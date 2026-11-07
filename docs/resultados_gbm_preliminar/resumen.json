@@ -1,0 +1,371 @@
+{
+  "version": "gbm_fe31_20261106T105509",
+  "artefacto": "modelos/gbm_fe31_20261106T105509.pkl",
+  "sha256": "c41f205abc01659854f9a619a604d319eae6f927010b00a528930242647a4a4f",
+  "version_datos": "csv:progvehiculos_limpio.csv:2472c2b60311b008",
+  "feature_version": "sobusa-fe-3.1",
+  "reglas_version": "comun-1.5",
+  "arboles": 531,
+  "segundos": 106.8,
+  "metricas": {
+    "evaluacion": "2025-04-01..2025-06-30 (filas comunes a todos los m\u00e9todos)",
+    "wape_total": {
+      "gbm_fe31": 0.1385,
+      "dia_hora_4sem": 0.206,
+      "dia_hora_8sem": 0.1961,
+      "ultima_semana": 0.2569,
+      "metodo_extreme": 0.1914
+    },
+    "mae_total": {
+      "gbm_fe31": 97.43,
+      "dia_hora_4sem": 144.93,
+      "dia_hora_8sem": 137.98,
+      "ultima_semana": 180.75,
+      "metodo_extreme": 134.67
+    },
+    "wape_pico_valle": {
+      "dia_hora_4sem": {
+        "pico": 0.1886,
+        "valle": 0.2151
+      },
+      "dia_hora_8sem": {
+        "pico": 0.1719,
+        "valle": 0.2088
+      },
+      "gbm_fe31": {
+        "pico": 0.128,
+        "valle": 0.144
+      },
+      "metodo_extreme": {
+        "pico": 0.1767,
+        "valle": 0.1991
+      },
+      "ultima_semana": {
+        "pico": 0.2309,
+        "valle": 0.2705
+      }
+    },
+    "cobertura_prediccion": {
+      "gbm_fe31": 1.0,
+      "dia_hora_4sem": 0.986388541352086,
+      "dia_hora_8sem": 0.9990292937572803,
+      "ultima_semana": 0.9189568143578238,
+      "metodo_extreme": 1.0
+    },
+    "cobertura_intervalo_80": 0.802,
+    "por_ruta_horizonte": [
+      {
+        "idruta": 16,
+        "horizonte_min": 30,
+        "periodo": "total",
+        "mae": 93.9393,
+        "rmse": 126.5963,
+        "wape": 0.1551,
+        "smape": 0.1764,
+        "n": 4779
+      },
+      {
+        "idruta": 16,
+        "horizonte_min": 30,
+        "periodo": "pico",
+        "mae": 121.8485,
+        "rmse": 163.5819,
+        "wape": 0.1463,
+        "smape": 0.1588,
+        "n": 1205
+      },
+      {
+        "idruta": 16,
+        "horizonte_min": 30,
+        "periodo": "valle",
+        "mae": 84.5295,
+        "rmse": 111.3917,
+        "wape": 0.1598,
+        "smape": 0.1823,
+        "n": 3574
+      },
+      {
+        "idruta": 16,
+        "horizonte_min": 60,
+        "periodo": "total",
+        "mae": 138.0548,
+        "rmse": 188.4248,
+        "wape": 0.117,
+        "smape": 0.1378,
+        "n": 4101
+      },
+      {
+        "idruta": 16,
+        "horizonte_min": 60,
+        "periodo": "pico",
+        "mae": 175.6265,
+        "rmse": 244.4549,
+        "wape": 0.1081,
+        "smape": 0.1168,
+        "n": 1008
+      },
+      {
+        "idruta": 16,
+        "horizonte_min": 60,
+        "periodo": "valle",
+        "mae": 125.8103,
+        "rmse": 166.131,
+        "wape": 0.1215,
+        "smape": 0.1446,
+        "n": 3093
+      },
+      {
+        "idruta": 16,
+        "horizonte_min": 120,
+        "periodo": "total",
+        "mae": 204.4096,
+        "rmse": 284.6856,
+        "wape": 0.0916,
+        "smape": 0.1172,
+        "n": 3214
+      },
+      {
+        "idruta": 16,
+        "horizonte_min": 120,
+        "periodo": "pico",
+        "mae": 263.7191,
+        "rmse": 363.3029,
+        "wape": 0.0853,
+        "smape": 0.0921,
+        "n": 818
+      },
+      {
+        "idruta": 16,
+        "horizonte_min": 120,
+        "periodo": "valle",
+        "mae": 184.1612,
+        "rmse": 252.2971,
+        "wape": 0.095,
+        "smape": 0.1258,
+        "n": 2396
+      },
+      {
+        "idruta": 2,
+        "horizonte_min": 30,
+        "periodo": "total",
+        "mae": 60.2873,
+        "rmse": 80.5754,
+        "wape": 0.2216,
+        "smape": 0.2696,
+        "n": 5314
+      },
+      {
+        "idruta": 2,
+        "horizonte_min": 30,
+        "periodo": "pico",
+        "mae": 76.9342,
+        "rmse": 102.0415,
+        "wape": 0.1926,
+        "smape": 0.2317,
+        "n": 1305
+      },
+      {
+        "idruta": 2,
+        "horizonte_min": 30,
+        "periodo": "valle",
+        "mae": 54.8684,
+        "rmse": 72.2242,
+        "wape": 0.2379,
+        "smape": 0.2819,
+        "n": 4009
+      },
+      {
+        "idruta": 2,
+        "horizonte_min": 60,
+        "periodo": "total",
+        "mae": 84.2433,
+        "rmse": 112.9567,
+        "wape": 0.1608,
+        "smape": 0.1936,
+        "n": 4978
+      },
+      {
+        "idruta": 2,
+        "horizonte_min": 60,
+        "periodo": "pico",
+        "mae": 111.6971,
+        "rmse": 146.8834,
+        "wape": 0.1467,
+        "smape": 0.1674,
+        "n": 1166
+      },
+      {
+        "idruta": 2,
+        "horizonte_min": 60,
+        "periodo": "valle",
+        "mae": 75.8458,
+        "rmse": 100.3133,
+        "wape": 0.1681,
+        "smape": 0.2016,
+        "n": 3812
+      },
+      {
+        "idruta": 2,
+        "horizonte_min": 120,
+        "periodo": "total",
+        "mae": 122.1049,
+        "rmse": 164.3823,
+        "wape": 0.1245,
+        "smape": 0.1561,
+        "n": 4546
+      },
+      {
+        "idruta": 2,
+        "horizonte_min": 120,
+        "periodo": "pico",
+        "mae": 161.268,
+        "rmse": 209.385,
+        "wape": 0.1176,
+        "smape": 0.131,
+        "n": 1019
+      },
+      {
+        "idruta": 2,
+        "horizonte_min": 120,
+        "periodo": "valle",
+        "mae": 110.7901,
+        "rmse": 148.8686,
+        "wape": 0.1276,
+        "smape": 0.1634,
+        "n": 3527
+      },
+      {
+        "idruta": 21,
+        "horizonte_min": 30,
+        "periodo": "total",
+        "mae": 52.2642,
+        "rmse": 68.9232,
+        "wape": 0.2753,
+        "smape": 0.3286,
+        "n": 5438
+      },
+      {
+        "idruta": 21,
+        "horizonte_min": 30,
+        "periodo": "pico",
+        "mae": 64.5197,
+        "rmse": 83.9204,
+        "wape": 0.2422,
+        "smape": 0.2843,
+        "n": 1378
+      },
+      {
+        "idruta": 21,
+        "horizonte_min": 30,
+        "periodo": "valle",
+        "mae": 48.1046,
+        "rmse": 63.0271,
+        "wape": 0.2936,
+        "smape": 0.3436,
+        "n": 4060
+      },
+      {
+        "idruta": 21,
+        "horizonte_min": 60,
+        "periodo": "total",
+        "mae": 72.8949,
+        "rmse": 96.8707,
+        "wape": 0.1958,
+        "smape": 0.2289,
+        "n": 5213
+      },
+      {
+        "idruta": 21,
+        "horizonte_min": 60,
+        "periodo": "pico",
+        "mae": 94.2397,
+        "rmse": 121.4726,
+        "wape": 0.1784,
+        "smape": 0.1996,
+        "n": 1304
+      },
+      {
+        "idruta": 21,
+        "horizonte_min": 60,
+        "periodo": "valle",
+        "mae": 65.7745,
+        "rmse": 87.1321,
+        "wape": 0.2053,
+        "smape": 0.2387,
+        "n": 3909
+      },
+      {
+        "idruta": 21,
+        "horizonte_min": 120,
+        "periodo": "total",
+        "mae": 103.7293,
+        "rmse": 137.4231,
+        "wape": 0.1453,
+        "smape": 0.1754,
+        "n": 4891
+      },
+      {
+        "idruta": 21,
+        "horizonte_min": 120,
+        "periodo": "pico",
+        "mae": 135.6793,
+        "rmse": 175.1361,
+        "wape": 0.1356,
+        "smape": 0.1511,
+        "n": 1241
+      },
+      {
+        "idruta": 21,
+        "horizonte_min": 120,
+        "periodo": "valle",
+        "mae": 92.8663,
+        "rmse": 121.9727,
+        "wape": 0.1506,
+        "smape": 0.1837,
+        "n": 3650
+      }
+    ],
+    "importancia_top10": [
+      {
+        "variable": "y_media_4_semanas",
+        "importancia_mae": 306.032
+      },
+      {
+        "variable": "horizonte_min",
+        "importancia_mae": 56.393
+      },
+      {
+        "variable": "marca_calendario",
+        "importancia_mae": 33.028
+      },
+      {
+        "variable": "tipo_dia",
+        "importancia_mae": 28.283
+      },
+      {
+        "variable": "id_ruta",
+        "importancia_mae": 22.545
+      },
+      {
+        "variable": "salidas_rezago_7d",
+        "importancia_mae": 21.691
+      },
+      {
+        "variable": "hora",
+        "importancia_mae": 18.029
+      },
+      {
+        "variable": "y_rezago_7d",
+        "importancia_mae": 13.804
+      },
+      {
+        "variable": "y_rezago_14d",
+        "importancia_mae": 12.482
+      },
+      {
+        "variable": "hora_sin",
+        "importancia_mae": 10.313
+      }
+    ]
+  }
+}

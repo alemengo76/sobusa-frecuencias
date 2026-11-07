@@ -1,0 +1,138 @@
+# Decisiones técnicas y supuestos (para E02 y E12)
+
+Fecha: 2 de noviembre de 2026. Cada decisión tiene su porqué y lo que la cambiaría.
+
+## 1. Contrato de disponibilidad D+1
+
+Al predecir en el instante t solo se usan resultados de viajes con salida programada antes de
+las 00:00 del día de t. La especificación pide actualización incremental diaria; esa carga
+nocturna es el contrato.
+
+- Rezagos autorizados: mismo horario de ayer y de hace 7 días; promedios día-hora de 4 y 8
+  semanas; nivel de 28 días cerrando ayer.
+- Rezagos de 15 y 60 min: eliminados (en un viaje de ~4 h ese dato no existe al predecir).
+- Prueba: `tests/unit/test_ml.py::test_features_sin_fuga_mismo_dia` pone valores absurdos en
+  todo el día de t y comprueba que nada cambia.
+
+## 2. Definición de demanda
+
+- Etiqueta: subidas acumuladas de las programaciones con **salida programada** en [t, t+H),
+  H = 30, 60 o 120 min, malla de 15 min. Población: finalizado S y cancelada N.
+- Extreme agrupa sus tablas (`timbradas_anio`) por **fecha fin** (`fecha_fin_liquidacion` o
+  `fechafin`). No se adopta: para despachar importa cuándo sale el bus. Se reportan métricas
+  con ambas definiciones en E05.
+
+## 3. Factor de carga (corrección de escala)
+
+`numeropasajeros` es el total de subidas de un viaje de ida y vuelta de ~4 h. La capacidad
+limita la gente a bordo al mismo tiempo. Sin corregir, la fórmula da 2 a 3 veces más buses
+(ruta 16 en pico: ~49 buses/h frente a 15-30 reales, 196 vehículos frente a 84).
+
+`buses/hora = ceil(subidas_hora × factor_carga_max / (capacidad × ocupación))`
+
+- **Actualizado el 6 de noviembre (param_v2, migración 0003):** el 0,40 PROVISIONAL se reemplazó
+  por el factor medido con el sensor (`factor_carga.csv`, reglas sensor-1.1), por ruta y tipo de
+  día. `todos` = mediana exacta de la ruta (0,400 / 0,435 / 0,379); laboral, sábado y
+  domingo-festivo = mediana ponderada por viajes de las medianas por hora (aproximación; la exacta
+  requiere los datos del sensor). Cada franja usa el de su tipo de día (calendario del FE) y, si
+  falta, el de `todos`. Lo que se usó queda en `recommendation.parametros_version`
+  (p. ej. `param_v2:laboral`). El factor por hora (0,32-0,54) no se implementó: no autorizado.
+- param_v1 se conserva (vigente = false) para trazabilidad y reversión (`alembic downgrade 0002`).
+- Prueba: `tests/unit/test_frecuencias.py::test_sin_factor_de_carga_la_recomendacion_es_absurda`.
+
+## 4. Capacidad
+
+`vehiculos.capacidad = 0` en toda la flota. Prioridad (`app/calidad/capacidad.py`):
+catálogo si > 0 → plazas del reporte de Extreme `rptVehiculos338.xls` → `n_sentados + n_depie`
+→ `sin_dato` (no se imputa). El original no se modifica.
+
+- Semilla por ruta (mediana de plazas del reporte): ruta 2 = 52, ruta 16 = 55, ruta 21 = 50.
+- Ojo: flota bimodal (buses de ~50 y de ~72 plazas). `scripts/capacidad_flota.py` calcula la
+  capacidad ponderada por viajes del segundo semestre de 2025; ese valor reemplaza la semilla.
+- El reporte trae datos personales (cédulas, teléfonos): nunca se sube al repositorio.
+
+## 5. Tope de flota
+
+`rutas.flotadisp_prog = 62` (ruta 16) no coincide con lo observado (84 buses en ruta a la vez,
+p95 laboral). Tope = p95 de buses activos por día y tipo de día (consulta 7 y
+`scripts/capacidad_flota.py`). Semilla: ruta 16 = 99; rutas 2 y 21 sin tope hasta medir.
+
+## 6. Ciclo
+
+Ruta 16: mediana laboral 238,8 min (medida). Rutas 2 y 21: PROVISIONAL 239 hasta correr la
+consulta 8. `rutas.tiempo_global = 0`, no sirve.
+
+## 7. Sentido y segmento
+
+`sentido = 'CICLO'` y `segmento_id = 'TOTAL'` (con CHECK en la base). Evidencia:
+- `puntoini = puntofin`: cada viaje es un circuito completo.
+- El detalle por segmento solo cubre enero-febrero de 2023 y tiene 32% de valores negativos.
+- Los scripts de Extreme solo cargan segmentos y estacionalidades para `cootransoriente`.
+- La configuración de segmentos depende de si el `idruta` es par o impar (script 99): son de
+  prueba, no tramos operativos.
+- El trigger asigna cada evento al segmento más cercano: no distingue ida de vuelta.
+
+**Evolución (E12):** segmentar por las "bases" de control de Sobusa y ubicar cada evento de
+torniquete avanzando a lo largo de la ruta (`ST_LineLocatePoint` con orden temporal).
+
+## 8. Calidad y cuarentena
+
+**Actualizado el 6 de noviembre (E02):** la ingesta ya no tiene reglas propias (`calidad_v1`,
+CAL-001..004). Usa `reglas_comunes.aplicar_cuarentena` de comun-1.5, la misma función con la que
+se construye el conjunto de entrenamiento (copia exacta en `app/fe31`, verificada por hash). Nada
+se imputa. Cada viaje marcado va a `ai_frecuencias.data_quality_error` con lote, regla, causa y
+valor, y `reglas_version = 'comun-1.5'`:
+
+| Regla (comun-1.5) | Causa | Afecta |
+|---|---|---|
+| pasajeros_extremo | más de 500 pasajeros en un viaje | etiqueta |
+| duracion_negativa | fin anterior al inicio | etiqueta |
+| inicio_incoherente | inicio fuera de [salida − 1 día, salida + 2 días] | etiqueta |
+| duracion_mayor_24h | duración mayor a 24 h (cierre tardío) | etiqueta |
+| fin_tardio | fin más de 2 días después de la salida | etiqueta |
+| bajadas_extremo | más de 500 bajadas | solo bajadas |
+| pasajeros_sin_conteo | elegible sin conteo usable (nulo, negativo) — marca `pax_bloquea` | etiqueta |
+
+Una franja con algún viaje elegible sin conteo usable queda sin medición (NULL), igual que la
+ventana de la etiqueta del FE. Se eliminó CAL-003 (3 × plazas): comun-1.5 usa el tope fijo de 500.
+Los registros de `calidad_v1` de cargas anteriores se conservan (su `reglas_version` lo dice).
+
+## 9. Hallazgos en los scripts de Extreme (para comunicarles)
+
+1. `fn_insert_timbradas_anio`, paso 10: al restar la contribución anterior no filtra por
+   `idprogramacion`; cada franja de `timbradas_anio` terminaría con el último viaje procesado.
+   Verificar con las consultas 1 a 3. Si se confirma, `timbradas_anio` y
+   `timbradas_consolidado` no se usan como referencia.
+2. Los campos `acumulada_*` parecen contadores de por vida del torniquete (consulta 5).
+3. `1. tablas.sql` no es el DDL real (error de sintaxis y `UNIQUE` distinto al `ON CONFLICT`).
+4. El cargue histórico de segmentos usa fecha fin; el trigger, la hora real del evento.
+5. Los errores de segmentación se silencian (`EXCEPTION WHEN OTHERS`).
+
+## 10. Línea base adicional: "método Extreme"
+
+Promedio por tipo de día y franja calculado solo con entrenamiento (reproduce la lógica de
+`timbradas_consolidado` sin su fuga ni su error). Sirve para decir cuánto mejora el modelo
+frente a cómo se calcula hoy.
+
+## 11. Marca de agua de la lectura incremental
+
+`progvehiculos` no tiene columna de última actualización (la `ultima_actualizacion` de la
+especificación existe en las tablas `timbradas_*`). La marca de agua es
+`COALESCE(fecha_fin_liquidacion, fechafin)`: el momento en que el resultado del viaje quedó
+disponible, la misma regla que usa `fn_insert_timbradas_anio`. En cada carga se releen además
+los últimos 3 días (`DIAS_REVISION`) para capturar liquidaciones o correcciones tardías; como
+cada día se recalcula completo, releer no duplica. Limitación: una corrección hecha más de 3 días
+después no se detecta; pedir a Extreme si existe una columna de modificación.
+
+## 12. Modelo de producción: gradient boosting FE 3.1 (6 de noviembre)
+
+- Variables: las 29 de FE 3.1 (`conjunto_entrenamiento.VARIABLES`), calculadas por el mismo
+  código al entrenar y al predecir (`app/fe31`). Objetivo: `y_pasajeros`. `y_abordajes` no se usa.
+- `HistGradientBoostingRegressor`, pérdida Poisson, un solo modelo con el horizonte como variable,
+  categóricas con códigos fijos. Número de árboles elegido con la partición de ajuste
+  (ene-mar 2025), no con una muestra aleatoria.
+- La API no entrena: carga el artefacto registrado (hash verificado antes de abrirlo, misma
+  versión de scikit-learn) y, si no puede, predice con la línea base registrada y lo deja escrito
+  en la ejecución. Ver `docs/INTEGRACION_GBM.md`.
+- Los viajes se copian en `ai_frecuencias.viaje_fuente` durante la ingesta (migración 0004), para
+  que el modelo calcule sus variables desde la base local y no dependa de Extreme en cada solicitud.
