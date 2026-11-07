@@ -1,0 +1,35 @@
+[project]
+name = "sobusa-frecuencias"
+version = "1.0.0"
+description = "Data Challenge 2026 · Predicción de demanda, frecuencias de despacho y alertas para Sobusa"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.1",
+    "alembic>=1.13",
+    "pydantic>=2.5",
+    "pandas>=3.1,<4",          # pandas 4 elimina .dayofweek (lo usa el FE 3.1)
+    "numpy>=2.4,<3",
+    "scikit-learn==1.9.1",     # FIJA: el artefacto del GBM solo carga con la versión con que se entrenó
+    "pyarrow>=14",
+    "holidays>=0.40",
+    "openpyxl>=3.1",
+    "xlrd>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.26", "locust>=2.20", "schemathesis>=3.25"]
+tablero = ["streamlit>=1.30", "requests>=2.31"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]

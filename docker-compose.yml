@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgis/postgis:14-3.4
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      LECTOR_PASSWORD: ${LECTOR_PASSWORD}
+      ESCRITOR_PASSWORD: ${ESCRITOR_PASSWORD}
+    volumes:
+      - datos_pg:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL_WRITE: ${DATABASE_URL_WRITE_DOCKER}
+      MODELOS_DIR: /app/modelos
+    volumes:
+      # Artefactos del GBM (.pkl + .json con hash) y salidas del entrenamiento, en el disco del equipo
+      - ./modelos:/app/modelos
+      - ./salidas_modelo_fe31:/app/salidas_modelo_fe31
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+volumes:
+  datos_pg:

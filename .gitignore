@@ -1,0 +1,20 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+salidas_*/
+*.parquet
+# Datos de Extreme con información personal: no se suben
+rptVehiculos*.xls
+vehiculos_sobusa.xlsx
+
+# Salidas del entrenamiento del GBM (los artefactos de modelos/ sí se versionan con su .json y hash)
+salidas_modelo_fe31/
+*.tmp
+
+# Respaldos de la base (llevan datos; se comparten por un medio privado, nunca en el repositorio)
+*.backup
+*.dump
+.venv/
+*.egg-info/
+datos_sensores/
