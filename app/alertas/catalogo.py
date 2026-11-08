@@ -37,6 +37,13 @@ CATALOGO = {
                 "recomendacion": "Entrenar un candidato y compararlo contra el modelo activo."},
 }
 
+# Las alertas de frecuencia y ocupación (ALT-002, ALT-003, ALT-004) se evalúan solo con las
+# recomendaciones de este horizonte. 60 min es el que se usa para decidir despachos (buses por
+# hora). Con los tres horizontes, la misma situación salía tres veces: el 10 de diciembre de
+# 2025 eran 293 alertas en un día. Las predicciones y recomendaciones de 30 y 120 min se siguen
+# calculando y guardando; ALT-001 y las demás alertas no cambian.
+HORIZONTE_ALERTAS_FRECUENCIA = 60
+
 ESTADOS = ("abierta", "reconocida", "asignada", "cerrada", "descartada")
 TRANSICIONES = {
     "abierta": {"reconocida", "asignada", "cerrada", "descartada"},
