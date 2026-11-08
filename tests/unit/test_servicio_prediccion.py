@@ -173,3 +173,28 @@ def test_recomendaciones_con_factores_medidos(entorno):
         tipo = "sabado" if d == sabado.normalize() else tipo_dia_d
         assert g.factor_carga_max.eq(ESPERADO[(r, tipo)]).all(), (r, d)
         assert g.parametros_version.eq(f"param_v2:{tipo}").all()
+
+
+def test_alertas_de_frecuencia_solo_60_min_con_umbral_de_la_base(entorno):
+    """Recomendaciones de 30, 60 y 120 min: todas se guardan, pero ALT-002/003/004 solo salen a
+    60 min y ALT-003 usa el umbral vigente de la base (2,0), no el del catálogo (1,0)."""
+    with repo_falso(entorno, entorno["gbm"]):
+        pred, _ = servicios.predecir(MagicMock(), RUTAS, DIA, entorno["gbm"], H)
+    with patch.object(servicios.repo, "parametros_vigentes", return_value=filas_param_v2()), \
+         patch.object(servicios, "_frecuencia_actual", return_value=None), \
+         patch.object(servicios.repo, "insertar_recomendaciones"):
+        rec = servicios.calcular_recomendaciones(MagicMock(), "e", pred, "puntual")
+    assert set(rec.horizonte_min) == {30, 60, 120}
+    rec = rec.assign(buses_hora_actual=(rec.buses_hora_recomendado - 1).clip(lower=1))   # déficit de 1 bus/h
+    with patch.object(servicios.repo, "umbrales_vigentes", return_value=({"ALT-003": 2.0}, {"ALT-003": 2})), \
+         patch.object(servicios.repo, "demanda_franja", _demanda_franja(entorno["franjas"])), \
+         patch.object(servicios.repo, "claves_alertas_abiertas", return_value=set()), \
+         patch.object(servicios.repo, "insertar_alertas") as insertar, \
+         patch.object(servicios, "notificar"):
+        servicios.evaluar_alertas(MagicMock(), "e", pred, rec)
+    alertas = insertar.call_args.args[2]
+    frecuencia = [a for a in alertas if a["codigo"] in ("ALT-002", "ALT-003", "ALT-004")]
+    assert frecuencia and {a["horizonte_min"] for a in frecuencia} == {60}
+    assert {a["horizonte_min"] for a in alertas if a["codigo"] == "ALT-001"} <= {30, 60, 120}
+    assert not [a for a in alertas if a["codigo"] == "ALT-003"]       # déficit de 1 < umbral 2
+    assert insertar.call_args.args[3]["ALT-003"] == 2                # se guarda la versión del umbral

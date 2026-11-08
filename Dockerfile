@@ -8,7 +8,8 @@ RUN useradd --create-home --uid 10001 sobusa
 
 COPY pyproject.toml ./
 COPY app ./app
-RUN pip install --no-cache-dir ".[dev]"
+RUN python -m pip install --upgrade pip
+RUN PIP_DEFAULT_TIMEOUT=600 python -m pip install --no-cache-dir ".[dev]"
 
 COPY migrations ./migrations
 COPY alembic.ini ./
@@ -25,3 +26,4 @@ USER sobusa
 EXPOSE 8000
 # Aplica migraciones y arranca la API
 CMD ["sh", "-c", "alembic upgrade head && uvicorn app.api.main:app --host 0.0.0.0 --port 8000"]
+

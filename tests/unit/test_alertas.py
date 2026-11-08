@@ -102,3 +102,75 @@ def test_transiciones(actual, nuevo, ok):
     else:
         with pytest.raises(motor.TransicionInvalida):
             motor.validar_transicion(actual, nuevo)
+
+
+# ----------------------------------------------------------------- alertas de frecuencia solo a 60 min
+
+import re  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from app.alertas.catalogo import HORIZONTE_ALERTAS_FRECUENCIA  # noqa: E402
+
+U_V2 = {**U, "ALT-003": 2.0}          # umbral vigente en la base desde la migración 0005
+
+
+def rec_h(horizonte, buses_actual, carga, recomendado):
+    return rec(buses_actual, carga, recomendado).assign(horizonte_min=horizonte)
+
+
+def codigos(df, u=U_V2):
+    return [a["codigo"] for a in motor.alt_002_003_004(df, u)]
+
+
+def test_horizonte_de_alertas_de_frecuencia_es_60():
+    assert HORIZONTE_ALERTAS_FRECUENCIA == 60
+
+
+@pytest.mark.parametrize("h,esperado", [(30, []), (60, ["ALT-002"]), (120, [])])
+def test_alt_002_solo_a_60_min(h, esperado):
+    assert codigos(rec_h(h, 10, 480, recomendado=10)) == esperado      # 96 % de ocupación, sin déficit
+
+
+@pytest.mark.parametrize("h,actual,recomendado,esperado", [
+    (30, 10, 14, []),                 # déficit de 4, pero a 30 min no se evalúa
+    (120, 10, 14, []),
+    (60, 10, 12, ["ALT-003"]),        # déficit de 2 buses/h: alerta con el umbral 2,0
+    (60, 10, 11, []),                 # déficit de 1 bus/h: ya no alcanza
+])
+def test_alt_003_solo_a_60_min_y_desde_2_buses(h, actual, recomendado, esperado):
+    assert codigos(rec_h(h, actual, 300, recomendado)) == esperado     # 60 % de ocupación
+
+
+@pytest.mark.parametrize("h,esperado", [(30, []), (60, ["ALT-004"]), (120, [])])
+def test_alt_004_solo_a_60_min(h, esperado):
+    assert codigos(rec_h(h, 20, 200, recomendado=6)) == esperado       # 20 % de ocupación
+
+
+def test_no_borra_recomendaciones_de_otros_horizontes():
+    r = pd.concat([rec_h(h, 10, 480, 20) for h in (30, 60, 120)], ignore_index=True)
+    copia = r.copy()
+    alertas = motor.alt_002_003_004(r, U_V2)
+    pd.testing.assert_frame_equal(r, copia)
+    assert {a["horizonte_min"] for a in alertas} == {60}
+    assert {a["codigo"] for a in alertas} == {"ALT-002", "ALT-003"}
+
+
+def test_horizonte_none_evalua_todos():
+    r = pd.concat([rec_h(h, 10, 480, 20) for h in (30, 60, 120)], ignore_index=True)
+    assert {a["horizonte_min"] for a in motor.alt_002_003_004(r, U_V2, horizonte=None)} == {30, 60, 120}
+
+
+def test_alt_001_sigue_en_todos_los_horizontes():
+    pred = pd.DataFrame({"idruta": 16, "franja_inicio": pd.Timestamp("2025-03-04 07:00"),
+                         "horizonte_min": [30, 60, 120], "demanda_pred": [1500] * 3,
+                         "demanda_referencia": [1000] * 3})
+    assert sorted(a["horizonte_min"] for a in motor.alt_001(pred, U_V2)) == [30, 60, 120]
+
+
+def test_umbral_alt003_nuevo_en_migracion_y_no_en_codigo():
+    raiz = Path(__file__).resolve().parents[2]
+    sql = (raiz / "migrations" / "sql" / "0005_umbral_alt003_v2.sql").read_text(encoding="utf-8")
+    assert re.search(r"'ALT-003',\s*'deficit_buses_hora',\s*2\.0", sql)
+    assert "SET vigente = false" in sql and "max(version) + 1" in sql   # versión nueva, la vieja se conserva
+    assert CATALOGO["ALT-003"]["valor"] == 1.0                           # el catálogo (semilla) no cambia
+    assert "2.0" not in (raiz / "app" / "alertas" / "motor.py").read_text(encoding="utf-8")
