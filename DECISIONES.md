@@ -136,3 +136,42 @@ después no se detecta; pedir a Extreme si existe una columna de modificación.
   en la ejecución. Ver `docs/INTEGRACION_GBM.md`.
 - Los viajes se copian en `ai_frecuencias.viaje_fuente` durante la ingesta (migración 0004), para
   que el modelo calcule sus variables desde la base local y no dependa de Extreme en cada solicitud.
+
+## 13. Alertas de frecuencia solo a 60 minutos y ALT-003 desde 2 buses/hora (7 de noviembre)
+
+- Prueba real del 10 de diciembre de 2025: 293 alertas en un día. Causas: ALT-002, 003 y 004 se
+  evaluaban en los tres horizontes (la misma situación salía tres veces) y ALT-003 saltaba con
+  1 bus/hora de déficit.
+- ALT-002, ALT-003 y ALT-004 se evalúan solo con las recomendaciones de 60 min
+  (`HORIZONTE_ALERTAS_FRECUENCIA` en `app/alertas/catalogo.py`). Las predicciones y
+  recomendaciones de 30 y 120 min se siguen calculando y guardando; ALT-001 y las demás no cambian.
+- ALT-003: versión 2 del umbral con 2,0 buses/hora (migración 0005, solo datos). La versión 1
+  (1,0) queda guardada con vigente = false; cada alerta guarda `umbral_version`.
+- Efecto medido sobre ese día: de 293 a unas 59 alertas. Pendiente: unir franjas seguidas en
+  episodios (bajaría a unas 15-25).
+- La capacidad (52 / 55 / 50) ya incluye pasajeros de pie (`datos/vehiculo_capacidad.csv`:
+  plazas = sentados + pie), así que las alertas de sobreocupación en pico son probablemente reales.
+
+## 14. Reconciliación de alertas abiertas al cambiar una regla (8 de noviembre)
+
+**Regla: todo cambio de umbral o de alcance de una alerta va acompañado de su reconciliación.**
+La deduplicación solo permite una alerta abierta por situación (código, ruta, franja y horizonte),
+así que una alerta vieja que la regla nueva ya no generaría quedaría abierta indefinidamente y
+taparía las detecciones nuevas.
+
+Migración 0006 (solo datos), aplicada después de la 0005:
+
+| Alertas abiertas (base del 7 nov) | Cantidad | Qué se hizo |
+|---|---|---|
+| ALT-002/003/004 con horizonte 30 o 120 min | 422 | `descartada`, motivo: solo se evalúan a 60 min |
+| ALT-003 a 60 min con déficit menor al umbral vigente (1 < 2) | 61 | `descartada`, motivo con el déficit y las dos versiones |
+| Siguen cumpliendo la regla vigente | 137 | Sin cambios en su fila (estado, usuario, `umbral_version` = 1); solo un comentario de revalidación en el historial |
+
+- Se usa `descartada` (no `cerrada`): `cerrada` queda para cuando alguien resolvió la situación.
+- El umbral de ALT-003 se lee de la tabla `umbral` vigente; no está escrito en la migración.
+- Todo queda en `alert_history` con usuario `migracion_0006` y el motivo de cada grupo.
+- Reversión (`alembic downgrade 0005`): solo reabre una alerta si sigue descartada, si la fila de la
+  0006 es la última de su historial (nadie la tocó después) y si su situación no tiene ya otra
+  alerta abierta. Vuelve a su estado anterior (por ejemplo `reconocida`, con su usuario). Las demás
+  se dejan y se informan. La reversión se registra como historial nuevo; no se borra nada.
+- La migración de sentido IDA/VUELTA, si se autoriza, pasa a ser la 0007.

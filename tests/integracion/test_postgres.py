@@ -30,7 +30,7 @@ def q(c, sql):
 
 
 def test_migraciones_aplicadas(c):
-    assert q(c, "SELECT version_num FROM ai_frecuencias.alembic_version") == "0004"
+    assert q(c, "SELECT version_num FROM ai_frecuencias.alembic_version") == "0006"
     assert q(c, "SELECT to_regclass('ai_frecuencias.viaje_fuente') IS NOT NULL")
 
 
@@ -66,3 +66,11 @@ def test_modelo_activo_predice(c):
     assert not pred.empty and (pred.demanda_pred >= 0).all()
     if (modelo.get("hiperparametros") or {}).get("metodo") == "gbm_fe31":
         assert not info["respaldo"], info.get("motivo_respaldo")
+
+
+def test_umbral_alt003_versionado(c):
+    filas = c.execute(text("SELECT version, valor, vigente FROM ai_frecuencias.umbral "
+                           "WHERE codigo = 'ALT-003' ORDER BY version")).all()
+    vigentes = [f for f in filas if f.vigente]
+    assert len(vigentes) == 1 and float(vigentes[0].valor) == 2.0
+    assert any(float(f.valor) == 1.0 and not f.vigente for f in filas)      # la versión anterior se conserva
