@@ -9,7 +9,7 @@ import hashlib
 
 import pandas as pd
 
-from app.alertas.catalogo import CATALOGO, TRANSICIONES
+from app.alertas.catalogo import CATALOGO, HORIZONTE_ALERTAS_FRECUENCIA, TRANSICIONES
 
 
 class TransicionInvalida(ValueError):
@@ -72,9 +72,15 @@ def alt_001(pred: pd.DataFrame, u: dict) -> list:
     return out
 
 
-def alt_002_003_004(rec: pd.DataFrame, u: dict) -> list:
-    """rec: contrato de recommendation (necesita buses_hora_actual)."""
+def alt_002_003_004(rec: pd.DataFrame, u: dict,
+                    horizonte: int | None = HORIZONTE_ALERTAS_FRECUENCIA) -> list:
+    """rec: contrato de recommendation (necesita buses_hora_actual).
+
+    Solo evalúa las recomendaciones de `horizonte` (60 min, ver catalogo.py). No modifica `rec`:
+    las recomendaciones de los demás horizontes siguen existiendo. horizonte=None evalúa todas."""
     out = []
+    if horizonte is not None:
+        rec = rec[rec.horizonte_min == horizonte]
     for r in rec.itertuples(index=False):
         occ = _ocupacion(r)
         if occ is not None and occ >= u["ALT-002"]:
