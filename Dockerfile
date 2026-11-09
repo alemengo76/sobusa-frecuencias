@@ -1,3 +1,8 @@
+# Etapa vacía con nombre: en modo "wheelhouse", docker compose la reemplaza por la carpeta
+# WHEELHOUSE_DIR (additional_contexts). En modo "internet" no se usa. Ver docs/WHEELHOUSE.md.
+# (Sin línea "# syntax=": obligaría a descargar el frontend de BuildKit, justo lo que se evita.)
+FROM scratch AS wheelhouse
+
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
@@ -8,8 +13,28 @@ RUN useradd --create-home --uid 10001 sobusa
 
 COPY pyproject.toml ./
 COPY app ./app
-RUN python -m pip install --upgrade pip
-RUN PIP_DEFAULT_TIMEOUT=600 python -m pip install --no-cache-dir ".[dev]"
+# Dos formas de instalar las dependencias (docs/WHEELHOUSE.md):
+#   PIP_MODO=internet   (predeterminado) pip descarga de PyPI, como siempre.
+#   PIP_MODO=wheelhouse sin red: solo desde la carpeta preparada y verificada (wheelhouse/).
+ARG PIP_MODO=internet
+RUN case "$PIP_MODO" in internet|wheelhouse) ;; \
+      *) echo "PIP_MODO debe ser 'internet' o 'wheelhouse' (recibido: '$PIP_MODO')" >&2; exit 1 ;; esac
+
+# Modo internet. Sin "pip install --upgrade pip": el pip de la imagen base basta y así cada
+# construcción usa la misma versión. El caché de pip (BuildKit) queda fuera de la imagen.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "$PIP_MODO" = "internet" ]; then \
+      PIP_DEFAULT_TIMEOUT=600 PIP_RETRIES=10 python -m pip install ".[dev]"; \
+    fi
+
+# Modo wheelhouse: --network=none garantiza que nada se descarga. Primero las herramientas de
+# construcción fijadas, se comprueba que quedaron instaladas, y luego el proyecto sin aislamiento.
+COPY docker/requisitos-congelados.txt docker/requisitos-construccion.txt docker/instalar_wheelhouse.sh \
+     scripts/wheelhouse_comun.py scripts/verificar_wheelhouse.py /opt/wheelhouse-listas/
+RUN --network=none --mount=type=bind,from=wheelhouse,target=/wheelhouse \
+    if [ "$PIP_MODO" = "wheelhouse" ]; then \
+      sh /opt/wheelhouse-listas/instalar_wheelhouse.sh /wheelhouse /opt/wheelhouse-listas; \
+    fi
 
 COPY migrations ./migrations
 COPY alembic.ini ./

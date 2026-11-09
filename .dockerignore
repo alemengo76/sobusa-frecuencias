@@ -1,0 +1,7 @@
+# Fuera del contexto de construcción de la imagen (docs/WHEELHOUSE.md):
+# - wheelhouse/ entra por su propio contexto (additional_contexts), no por este
+# - respaldos/ y .env llevan datos y credenciales; .git/ no hace falta en la imagen
+wheelhouse/
+respaldos/
+.env
+.git/
