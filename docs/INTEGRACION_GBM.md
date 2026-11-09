@@ -247,7 +247,8 @@ Si al entrenar Docker dice `Permission denied` en `/app/modelos`, corran el paso
 2b. **Alertas**: ~~ALT-002/003/004 solo con H = 60 min y ALT-003 a 2 buses/hora~~ (rama
    `alertas-60min`, migraciones 0005 y 0006 —la 0006 reconcilia las alertas abiertas—; ver `DECISIONES.md`
    §13 y §14). Falta unir franjas seguidas en episodios.
-2c. **Cuarentena**: no volver a registrar un viaje con la misma regla y versión en otro lote.
+2c. ~~**Cuarentena**: no volver a registrar un viaje con la misma regla y versión en otro lote~~:
+   eventos + detecciones (migración 0007, `DECISIONES.md` §8).
 2d. **execution_log.finalizada_en**: usar `clock_timestamp()` y no `now()` (que es la hora de inicio
    de la transacción).
 2e. ~~**Capacidad**: confirmar si 52 / 55 / 50 incluyen pasajeros de pie~~: sí los incluyen
@@ -266,8 +267,8 @@ Si al entrenar Docker dice `Permission denied` en `/app/modelos`, corran el paso
    antes de abrir el archivo; documéntenlo en el reporte.
 9. **Sin cambios** (como pidieron): `y_abordajes` no entra al modelo; no hay sensores en la ingesta ni
    se usa la tabla de 42 GB; no hay factores por hora; no hay IDA/VUELTA ni B1-B5; FE 3.2 no
-   reemplaza a FE 3.1. Las migraciones nuevas se numeran 0003 a 0006; si se autoriza la de
-   sentido y segmentos, va después (0007).
+   reemplaza a FE 3.1. Las migraciones nuevas se numeran 0003 a 0007; si se autoriza la de
+   sentido y segmentos, va después (0008).
 10. `app/ml/gbm.py` y `scripts/entrenar_y_evaluar.py` (el candidato anterior) se dejaron con una nota de
     que fueron reemplazados; se pueden borrar cuando revisen esta versión.
 

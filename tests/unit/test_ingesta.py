@@ -87,3 +87,26 @@ def test_tramos_contiguos():
     d = [datetime(2023, 1, 3), datetime(2023, 1, 1), datetime(2023, 1, 2), datetime(2023, 1, 9)]
     assert tramos_contiguos(d) == [(datetime(2023, 1, 1), datetime(2023, 1, 4)),
                                    (datetime(2023, 1, 9), datetime(2023, 1, 10))]
+
+
+def test_filas_calidad_normaliza_el_faltante_y_conserva_el_original():
+    from app.ingesta import filas_calidad
+    q = pd.DataFrame({"lote": "L", "idprogramacion": [1, 2, 3], "idruta": 16, "regla": "r", "causa": "c",
+                      "valor": pd.Series([None, "NaN", "97199"], dtype=object)})
+    f = filas_calidad(q, "comun-1.5")
+    assert [x["valor"] for x in f] == [None, None, "97199"]
+    assert [x["valor_original"] for x in f] == [None, "NaN", "97199"]
+    assert {x["reglas_version"] for x in f} == {"comun-1.5"} and {x["tabla_origen"] for x in f} == {"progvehiculos"}
+    assert all(isinstance(x["idprogramacion"], int) for x in f)
+
+
+def test_sql_de_calidad_coincide_con_el_indice_de_la_migracion():
+    """El ON CONFLICT debe repetir exactamente las expresiones del índice uq_dq_evento."""
+    import re
+    from pathlib import Path
+
+    from app.ingesta import SQL_EVENTO_CALIDAD
+    sql = (Path(__file__).resolve().parents[2] / "migrations" / "sql" / "0007_dq_eventos.sql").read_text(encoding="utf-8")
+    indice = re.search(r"CREATE UNIQUE INDEX uq_dq_evento ON data_quality_error\s*\((.*?)\);", sql, re.S).group(1)
+    conflicto = re.search(r"ON CONFLICT \((tabla_origen.*?)\)\s*DO UPDATE", SQL_EVENTO_CALIDAD, re.S).group(1)
+    assert " ".join(indice.split()) == " ".join(conflicto.split())

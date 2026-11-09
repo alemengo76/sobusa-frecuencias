@@ -30,6 +30,41 @@ COLUMNAS = ("idprogramacion, idruta, idvehiculo, fechasalida, fechainicio, fecha
             "finalizado, cancelada, numeropasajeros, numerobajadas")
 _IDENT = re.compile(r"^[a-z_][a-z0-9_]*$")
 
+# Un error de calidad = un EVENTO (tabla_origen + idprogramacion + regla + reglas_version + valor)
+# con una DETECCIÓN por cada lote en que se vio (migración 0007, DECISIONES.md §8). En una sola
+# sentencia: inserta el evento o, si ya existe, solo actualiza su última detección; RETURNING da su
+# id en los dos casos (por eso DO UPDATE y no DO NOTHING) y con él se registra la detección del
+# lote. Reintentar el mismo lote no la repite (UNIQUE (evento_id, lote)).
+# El ON CONFLICT debe repetir EXACTAMENTE las expresiones del índice uq_dq_evento.
+SQL_EVENTO_CALIDAD = """
+WITH evento AS (
+    INSERT INTO data_quality_error AS e
+           (lote, tabla_origen, idprogramacion, idruta, regla, causa, valor, reglas_version,
+            ultimo_lote, ultima_deteccion)
+    VALUES (:lote, :tabla_origen, :idprogramacion, :idruta, :regla, :causa, :valor, :reglas_version,
+            :lote, now())
+    ON CONFLICT (tabla_origen, idprogramacion, regla, reglas_version, (valor IS NULL), (coalesce(valor, '')))
+    DO UPDATE SET ultimo_lote = EXCLUDED.ultimo_lote, ultima_deteccion = EXCLUDED.ultima_deteccion
+    RETURNING e.id
+)
+INSERT INTO data_quality_deteccion (evento_id, lote, detectado_en, idruta, causa, valor_original)
+SELECT id, :lote, now(), :idruta, :causa, :valor_original FROM evento
+ON CONFLICT (evento_id, lote) DO NOTHING
+"""
+_FALTANTE = {"NaN", "nan"}
+
+
+def filas_calidad(cuarentena: pd.DataFrame, reglas_version: str, tabla_origen: str = "progvehiculos") -> list[dict]:
+    """Parámetros de SQL_EVENTO_CALIDAD. valor va normalizado (un faltante es NULL, nunca el texto
+    'NaN'); valor_original es lo que llegó."""
+    filas = []
+    for r in cuarentena.astype(object).where(cuarentena.notna(), None).to_dict("records"):
+        original = r.get("valor")
+        filas.append({**r, "tabla_origen": tabla_origen, "reglas_version": reglas_version,
+                      "valor_original": original,
+                      "valor": None if original is None or original in _FALTANTE else original})
+    return filas
+
 
 # progvehiculos no tiene columna de última actualización. La marca de agua es el momento
 # en que el resultado del viaje quedó disponible: el fin de la liquidación si existe,
@@ -142,11 +177,7 @@ def _guardar(w, dias, franjas, cuarentena, fin_ventana, filas, lote, viajes=None
                           :programaciones, :programaciones_validas, :lote)"""),
                   franjas.astype(object).where(franjas.notna(), None).to_dict("records"))
     if cuarentena is not None and not cuarentena.empty:
-        w.execute(text("""INSERT INTO data_quality_error (lote, tabla_origen, idprogramacion, idruta,
-                          regla, causa, valor, reglas_version) VALUES (:lote, 'progvehiculos',
-                          :idprogramacion, :idruta, :regla, :causa, :valor, :v)
-                          ON CONFLICT DO NOTHING"""),
-                  cuarentena.assign(v=REGLAS_VERSION).astype(object).to_dict("records"))
+        w.execute(text(SQL_EVENTO_CALIDAD), filas_calidad(cuarentena, REGLAS_VERSION))
     w.execute(text("""INSERT INTO watermark (tabla_origen, ultima_actualizacion, filas_ultima_carga, lote)
                       VALUES ('progvehiculos', :m, :n, :l)
                       ON CONFLICT (tabla_origen) DO UPDATE SET ultima_actualizacion = EXCLUDED.ultima_actualizacion,
