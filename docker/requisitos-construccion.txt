@@ -1,0 +1,6 @@
+# Herramientas de construcción, fijadas con == (docs/WHEELHOUSE.md).
+# En modo wheelhouse se instalan desde la carpeta ANTES del proyecto, y el proyecto y cualquier
+# paquete que se construya desde su código fuente usan exactamente estas (--no-build-isolation).
+# pyproject.toml pide setuptools>=68; preparar_wheelhouse.py comprueba que esta versión lo cumpla.
+# Si la fase A o B dice que falta una herramienta, se agrega aquí con == y se repite la fase A.
+setuptools==80.9.0
