@@ -57,7 +57,9 @@ def evaluar_programaciones(p: pd.DataFrame, lote: str) -> tuple[pd.DataFrame, pd
         "idruta": filas.id_ruta.astype(int),
         "regla": filas.regla,
         "causa": filas.regla.map(DESCRIPCION),
-        "valor": [None if pd.isna(v) else f"{v:g}" for v in filas.valor],
+        # dtype=object: con pandas 3 una lista de textos y None se vuelve columna de texto con NaN,
+        # y ese NaN llegaba a la base como el TEXTO 'NaN'. Un faltante debe quedar como NULL.
+        "valor": pd.Series([None if pd.isna(v) else f"{v:g}" for v in filas.valor], dtype=object),
     }, columns=COLUMNAS_CUARENTENA)
     validas = p.loc[P.index[P.pax_valido.to_numpy()]]
     return validas, cuarentena

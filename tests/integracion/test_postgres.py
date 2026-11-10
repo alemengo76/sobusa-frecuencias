@@ -30,7 +30,7 @@ def q(c, sql):
 
 
 def test_migraciones_aplicadas(c):
-    assert q(c, "SELECT version_num FROM ai_frecuencias.alembic_version") == "0006"
+    assert q(c, "SELECT version_num FROM ai_frecuencias.alembic_version") == "0007"
     assert q(c, "SELECT to_regclass('ai_frecuencias.viaje_fuente') IS NOT NULL")
 
 

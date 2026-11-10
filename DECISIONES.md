@@ -97,6 +97,35 @@ Una franja con algún viaje elegible sin conteo usable queda sin medición (NULL
 ventana de la etiqueta del FE. Se eliminó CAL-003 (3 × plazas): comun-1.5 usa el tope fijo de 500.
 Los registros de `calidad_v1` de cargas anteriores se conservan (su `reglas_version` lo dice).
 
+### Eventos y detecciones (migración 0007, 8 de noviembre)
+
+La ingesta trabaja por ventanas (un lote por ventana) y relee los días que Extreme modifica, así
+que el mismo error quedaba registrado en varios lotes: 17.418 filas, de las que 2.342 repetían un
+error ya registrado (2.324 grupos). Además, los faltantes se guardaban como el texto `'NaN'`
+(pandas 3 convertía el `None` en NaN), no como NULL.
+
+- **Evento** (`data_quality_error`): uno por `tabla_origen + idprogramacion + regla +
+  reglas_version + valor`. `lote` y `creado_en` = primera detección; `ultimo_lote` y
+  `ultima_deteccion` = la más reciente. Si el valor cambia y sigue incumpliendo, o cambia la
+  versión de las reglas, es otro evento. Si deja de incumplir, no se registra nada nuevo.
+  Si el valor vuelve a uno anterior (A → B → A), se reactiva el evento A.
+- **Detección** (`data_quality_deteccion`): una por evento y lote, con la ruta, la causa y el
+  valor tal como llegaron (`valor_original`). Un reintento del mismo lote no la repite. Consultar
+  un lote = buscar sus detecciones.
+- El valor faltante es NULL. PostgreSQL 14 no tiene `NULLS NOT DISTINCT`: el índice usa
+  `(valor IS NULL), coalesce(valor, '')`, y el `ON CONFLICT` de la ingesta repite esas expresiones.
+- Se retiró `UNIQUE (lote, tabla_origen, idprogramacion, regla)`: no incluye versión ni valor y
+  contradecía la identidad del evento. `idprogramacion` pasó a NOT NULL (la única ruta de
+  escritura ya lo garantizaba; un viaje sin identificador hace fallar la ventana, como antes).
+- Nada se borró: cada fila anterior es una detección con su `id_original`. La migración comprueba
+  con una huella md5 de las 10 columnas (NULL, `'NaN'` y `'nan'` distintos) que evento + detección
+  reconstruyen exactamente la tabla anterior; la huella queda en el comentario de la tabla.
+- Downgrade: una fila por detección. Las anteriores a la 0007 recuperan su `id`; las posteriores
+  reciben ids nuevos. Se niega si la forma antigua no puede representar los datos (dos eventos con
+  el mismo lote, viaje y regla). Las secuencias nunca bajan: se usa el mayor entre lo ya entregado
+  y el `id` máximo, en el upgrade y en el downgrade.
+- Pendiente (E12): marcar como "resuelto" un evento cuando el viaje releído deja de incumplir.
+
 ## 9. Hallazgos en los scripts de Extreme (para comunicarles)
 
 1. `fn_insert_timbradas_anio`, paso 10: al restar la contribución anterior no filtra por
@@ -174,4 +203,4 @@ Migración 0006 (solo datos), aplicada después de la 0005:
   0006 es la última de su historial (nadie la tocó después) y si su situación no tiene ya otra
   alerta abierta. Vuelve a su estado anterior (por ejemplo `reconocida`, con su usuario). Las demás
   se dejan y se informan. La reversión se registra como historial nuevo; no se borra nada.
-- La migración de sentido IDA/VUELTA, si se autoriza, pasa a ser la 0007.
+- La migración de sentido IDA/VUELTA, si se autoriza, pasa a ser la 0008 (la 0007 es la de eventos de calidad, §8).

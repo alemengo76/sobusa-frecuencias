@@ -70,3 +70,15 @@ def test_ingesta_y_feature_engineering_marcan_igual():
     assert set(P.id_programacion[P.pax_bloquea]) <= set(q.idprogramacion)
     assert set(q.idprogramacion[q.regla.eq("pasajeros_sin_conteo")]) == \
         set(P.id_programacion[P.pax_bloquea & ~P.cuarentena_etiqueta])
+
+
+def test_valor_faltante_queda_como_null_y_no_como_texto_nan():
+    """Con pandas 3 el None de la lista se volvía NaN y llegaba a la base como el texto 'NaN'."""
+    p = pd.DataFrame({"idprogramacion": [1, 2], "idruta": 16, "fechasalida": pd.Timestamp("2024-05-20 06:00"),
+                      "fechainicio": pd.Timestamp("2024-05-20 06:00"), "fechafin": pd.Timestamp("2024-05-20 10:00"),
+                      "finalizado": "S", "cancelada": "N", "numeropasajeros": [np.nan, 600.0], "numerobajadas": 0.0})
+    _, q = evaluar_programaciones(p, lote="prueba")
+    valores = q.set_index("idprogramacion").valor
+    assert valores.dtype == object
+    assert valores.loc[1] is None and valores.loc[2] == "600"
+    assert not q.valor.isin(["NaN", "nan"]).any()
