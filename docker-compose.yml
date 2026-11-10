@@ -19,7 +19,14 @@ services:
       retries: 20
 
   app:
-    build: .
+    build:
+      context: .
+      # PIP_MODO=wheelhouse instala sin red desde WHEELHOUSE_DIR (docs/WHEELHOUSE.md). Sin variables,
+      # todo queda como antes: pip descarga de PyPI y la carpeta vacía no se usa.
+      args:
+        PIP_MODO: ${PIP_MODO:-internet}
+      additional_contexts:
+        wheelhouse: ${WHEELHOUSE_DIR:-./docker/wheelhouse-vacio}
     env_file: .env
     environment:
       DATABASE_URL_WRITE: ${DATABASE_URL_WRITE_DOCKER}

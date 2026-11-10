@@ -20,3 +20,9 @@ salidas_modelo_fe31/
 datos_sensores/
 
 build/
+
+# Respaldos locales de la base (pg_dump en .sql): llevan datos, nunca al repositorio
+respaldos/
+
+# Ruedas descargadas/construidas para instalar sin red (docs/WHEELHOUSE.md): se regeneran, no se versionan
+wheelhouse/

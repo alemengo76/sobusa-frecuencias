@@ -27,8 +27,6 @@ HUELLA = {
                       "ORDER BY recommendation_id), '')) FROM ai_frecuencias.recommendation",
     "alert": "SELECT count(*), md5(coalesce(string_agg(alert_id || '|' || estado, ',' ORDER BY alert_id), '')) "
              "FROM ai_frecuencias.alert",
-    "data_quality_error": "SELECT count(*), md5(coalesce(string_agg(id || '|' || regla, ',' ORDER BY id), '')) "
-                          "FROM ai_frecuencias.data_quality_error",
     "model_registry_previos": "SELECT count(*), md5(coalesce(string_agg(model_id || '|' || version, ',' "
                               "ORDER BY model_id), '')) FROM ai_frecuencias.model_registry WHERE nombre <> 'gbm_fe31'",
     "parametro_v1": "SELECT count(*), md5(coalesce(string_agg(id || '|' || factor_carga_max || '|' || capacidad_nominal, ',' "
@@ -37,8 +35,28 @@ HUELLA = {
 }
 
 
+# Historial de calidad: las 10 columnas de cada fila de data_quality_error tal como era antes de la
+# 0007 (distinguiendo NULL, 'NaN' y 'nan'). Desde la 0007 se calcula con evento + detección de las
+# filas migradas, así que la huella NO cambia al migrar: si cambia, se perdió o alteró algo.
+_FILA_DQ = ("concat_ws('|', {id}, quote_nullable({lote}), quote_nullable(e.tabla_origen), "
+            "quote_nullable(e.idprogramacion), quote_nullable({idruta}), quote_nullable(e.regla), "
+            "quote_nullable({causa}), quote_nullable({valor}), quote_nullable(e.reglas_version), "
+            "quote_nullable({creado_en} AT TIME ZONE 'UTC'))")
+DQ_ANTES = ("SELECT count(*), coalesce(md5(string_agg(" + _FILA_DQ.format(
+    id="e.id", lote="e.lote", idruta="e.idruta", causa="e.causa", valor="e.valor", creado_en="e.creado_en")
+    + ", E'\\n' ORDER BY e.id)), '') FROM ai_frecuencias.data_quality_error e")
+DQ_DESDE_0007 = ("SELECT count(*), coalesce(md5(string_agg(" + _FILA_DQ.format(
+    id="d.id_original", lote="d.lote", idruta="d.idruta", causa="d.causa", valor="d.valor_original",
+    creado_en="d.detectado_en") + ", E'\\n' ORDER BY d.id_original)), '') "
+    "FROM ai_frecuencias.data_quality_deteccion d JOIN ai_frecuencias.data_quality_error e ON e.id = d.evento_id "
+    "WHERE d.id_original IS NOT NULL")
+
+
 def huella(c) -> dict:
-    return {k: list(c.execute(text(q)).one()) for k, q in HUELLA.items()}
+    h = {k: list(c.execute(text(q)).one()) for k, q in HUELLA.items()}
+    con_detecciones = c.execute(text("SELECT to_regclass('ai_frecuencias.data_quality_deteccion') IS NOT NULL")).scalar()
+    h["data_quality_historial"] = list(c.execute(text(DQ_DESDE_0007 if con_detecciones else DQ_ANTES)).one())
+    return h
 
 
 def estado(c) -> dict:
@@ -52,6 +70,11 @@ def estado(c) -> dict:
         "demanda_franja": q("SELECT count(*) FROM ai_frecuencias.demanda_franja"),
         "reglas_cuarentena": [list(f) for f in c.execute(text(
             "SELECT reglas_version, count(*) FROM ai_frecuencias.data_quality_error GROUP BY 1 ORDER BY 1"))],
+        "calidad_eventos_repetidos": q(
+            "SELECT count(*) FROM (SELECT 1 FROM ai_frecuencias.data_quality_error GROUP BY tabla_origen, "
+            "idprogramacion, regla, reglas_version, (valor IS NULL), coalesce(valor, '') HAVING count(*) > 1) x"),
+        "calidad_detecciones": q("SELECT count(*) FROM ai_frecuencias.data_quality_deteccion")
+            if q("SELECT to_regclass('ai_frecuencias.data_quality_deteccion') IS NOT NULL") else None,
         "modelo_activo": q("SELECT nombre || ' ' || version FROM ai_frecuencias.model_registry WHERE estado = 'activo'"),
     }
 
@@ -74,6 +97,9 @@ def main():
         if args.comparar:
             antes = json.loads(args.comparar.read_text(encoding="utf-8"))
             for k, v in antes.items():
+                if k not in h:
+                    print(f"--     {k}: huella de una versión anterior del script; vuelva a guardarla")
+                    continue
                 ok = h.get(k) == v or (k == "execution_log" and h[k][0] >= v[0])
                 fallas += not ok
                 print(f"{'OK   ' if ok else 'CAMBIO'} {k}: antes {v[0]} filas, ahora {h[k][0]}")
