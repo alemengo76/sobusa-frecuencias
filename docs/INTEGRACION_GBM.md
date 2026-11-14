@@ -267,8 +267,9 @@ Si al entrenar Docker dice `Permission denied` en `/app/modelos`, corran el paso
    antes de abrir el archivo; documéntenlo en el reporte.
 9. **Sin cambios** (como pidieron): `y_abordajes` no entra al modelo; no hay sensores en la ingesta ni
    se usa la tabla de 42 GB; no hay factores por hora; no hay IDA/VUELTA ni B1-B5; FE 3.2 no
-   reemplaza a FE 3.1. Las migraciones nuevas se numeran 0003 a 0007; si se autoriza la de
-   sentido y segmentos, va después (0008).
+   reemplaza a FE 3.1. Las migraciones nuevas se numeran 0003 a 0008 (la 0008 es la de
+   trazabilidad de predicciones, `DECISIONES.md` §15); si se autoriza la de sentido y segmentos, va
+   después (0009).
 10. `app/ml/gbm.py` y `scripts/entrenar_y_evaluar.py` (el candidato anterior) se dejaron con una nota de
     que fueron reemplazados; se pueden borrar cuando revisen esta versión.
 

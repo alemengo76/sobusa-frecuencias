@@ -203,4 +203,66 @@ Migración 0006 (solo datos), aplicada después de la 0005:
   0006 es la última de su historial (nadie la tocó después) y si su situación no tiene ya otra
   alerta abierta. Vuelve a su estado anterior (por ejemplo `reconocida`, con su usuario). Las demás
   se dejan y se informan. La reversión se registra como historial nuevo; no se borra nada.
-- La migración de sentido IDA/VUELTA, si se autoriza, pasa a ser la 0008 (la 0007 es la de eventos de calidad, §8).
+- La migración de sentido IDA/VUELTA, si se autoriza, pasa a ser la 0009 (la 0007 es la de eventos de calidad, §8; la 0008, la de trazabilidad de predicciones, §15).
+
+## 15. Trazabilidad entre predicciones y recomendaciones (P1, migración 0008, 12 de noviembre)
+
+Estado (14 de noviembre): migración 0008, huella, contrato, repositorio y servicios implementados. La integración P1 superó las pruebas unitarias, de API y de integración en una base PostgreSQL desechable. Se verificaron la trazabilidad de predicciones y recomendaciones, la reutilización por huella, la atomicidad y el rechazo seguro del downgrade cuando existen colisiones con la clave antigua.
+
+**La migración 0008 todavía NO está aplicada a la base local**, que permanece en `0007`. No iniciar la aplicación ni ejecutar migraciones sobre esa base hasta contar con autorización explícita. Tampoco realizar commit ni push sin autorización.
+
+Problema (auditoría del 10 de noviembre, confirmado en la base): 3.729 de 4.236 recomendaciones sin
+`prediction_id` y dos ejecuciones de predicción "exitosas" que declaraban 507 y 585 filas sin tener
+ninguna. Causas: (A1) la clave única de `prediction` no incluía la ejecución y `data_cutoff` es siempre
+el día a las 00:00, así que repetir el mismo día con el mismo modelo chocaba; `ON CONFLICT DO NOTHING`
+descartaba las filas y la función devolvía las filas *enviadas*. Además, si el histórico se había
+corregido, las predicciones nuevas no se podían guardar. (A2) `ejecutar_frecuencias` recomendaba sobre
+las predicciones en memoria, que no tienen `prediction_id`. La corrección del 3 de noviembre solo
+cubría `/recommendations/calculate`.
+
+- **Cada ejecución guarda sus predicciones**: clave única `(execution_id, idruta, sentido,
+  segmento_id, franja_inicio, horizonte_min)`. `franja_minutos` no entra en la clave: es siempre 15
+  (regla `CHECK (franja_minutos = 15)` en la base y en el contrato).
+- **Sin duplicar lo idéntico**: la huella `huella-pred/1` (SHA-256, `app/ml/contrato.py`) resume el
+  contenido que se guarda (ruta, sentido, segmento, franja, duración, horizonte, demanda, límites,
+  nivel, definición de tiempo, modelo, versión de modelo y de variables, corte de datos) más la
+  solicitud (día, rutas, horizontes). Se calcula sobre los mismos valores que se insertan: decimales
+  redondeados a 2 (ROUND_HALF_UP, como `numeric(10,2)`), fechas en hora local de Bogotá sin zona;
+  nulos e infinitos son error. Si una ejecución obtiene una huella ya guardada, reutiliza las filas
+  de la dueña (`execution_log.resumen.reutiliza`). Si el histórico cambió y eso cambia algún valor,
+  la huella cambia y se guardan filas nuevas: nunca se reutiliza una predicción obsoleta.
+- **Un solo dueño aunque lleguen dos solicitudes a la vez**: `prediction_set (huella PK,
+  execution_id UNIQUE)`. Reserva, predicciones y cierre van en la MISMA transacción; si algo falla,
+  el rollback quita también la reserva y la falla se registra en una transacción aparte. Con
+  `READ COMMITTED` (el predeterminado de PostgreSQL), la segunda solicitud espera a la primera: si la
+  primera confirma, reutiliza; si se revierte, pasa a ser la dueña. `lock_timeout` de 30 s.
+- **Recomendaciones nuevas siempre con predicción**: `CHECK (prediction_id IS NOT NULL) NOT VALID`.
+  Las 3.729 anteriores se conservan sin cambios (no se cruzan por ruta y franja: sería inventar el
+  vínculo). Consecuencia: un `UPDATE` sobre una de ellas falla si no se le asigna `prediction_id`;
+  hoy el código no actualiza recomendaciones. No ejecutar `VALIDATE CONSTRAINT`.
+- **Dos identificadores en las respuestas** (`POST /predictions/run`, y el `resumen` de
+  `GET /frequency/executions/{id}`): `execution_id` identifica la SOLICITUD (cada llamada crea la
+  suya, con su estado, parámetros y correlation-id); `execution_id_predicciones` identifica la
+  ejecución DUEÑA de las filas de `prediction`. Son iguales cuando la solicitud guardó predicciones
+  nuevas; distintos cuando reutilizó (entonces `resumen.reutiliza` también lo dice y
+  `predicciones_guardadas` es 0). `GET /predictions?execution_id=` filtra literalmente por la columna
+  `prediction.execution_id`: con el id de una solicitud que reutilizó devuelve una página vacía
+  (`total` 0, código 200), no un error. Para ver sus predicciones: leer
+  `execution_id_predicciones` y consultar `GET /predictions?execution_id=<ese id>`.
+  `POST /recommendations/calculate` sí acepta cualquiera de los dos (resuelve la dueña).
+  Las recomendaciones pertenecen a la ejecución que las calculó (`GET /recommendations?execution_id=`
+  de la ejecución de frecuencias o de recomendación) y cada una apunta por `prediction_id` a una fila
+  de la dueña; antes de guardarlas se comprueba que hay exactamente una por predicción y que ruta,
+  sentido, segmento, franja y horizonte coinciden con los de su predicción.
+- Downgrade: vuelve a la clave antigua y se niega si dos ejecuciones guardaron predicciones con la
+  misma (ruta, sentido, segmento, franja, horizonte, modelo, corte). Se pierde `prediction_set`.
+- Las pruebas que confirman transacciones (`tests/integracion/test_trazabilidad.py`) solo corren en
+  una base desechable (`SOBUSA_BD_DESECHABLE=1` y nombre `sobusa_desechable*`).
+
+### Verificaciones posteriores (14 de noviembre)
+
+- **Registro seguro de fallos:** `ejecutar_frecuencias` utiliza `_registrar_fallo` para registrar errores en una transacción independiente. Si el registro del fallo también falla, no debe ocultar la excepción original.
+- **Lectura completa de predicciones:** `predicciones_de_ejecucion` compara la cantidad de filas recuperadas con el total informado por el repositorio. Si no coinciden, lanza `RuntimeError` y no continúa con una lectura incompleta. Prueba específica: `test_predicciones_de_ejecucion_rechaza_lectura_incompleta`.
+- **Pruebas unitarias y API:** 202 pruebas unitarias/API aprobadas, 0 fallidas y 0 omitidas, ejecutadas el 14 de noviembre de 2026 en el entorno del proyecto. Se generaron 1.238 advertencias, principalmente de compatibilidad con Pandas 4. Permanecen advertencias de compatibilidad futura de Pandas y Starlette.
+- **Pruebas de integración PostgreSQL:** 39 aprobadas en base desechable. E7 verificó 260 recomendaciones nuevas, ninguna sin `prediction_id` y ninguna con enlaces inconsistentes. E8 verificó que el downgrade se rechaza cuando la clave antigua produciría colisiones, conservando la base en `0008`.
+- **Precaución para pruebas de integración:** test_reproduce_a1 requiere una base de datos desechable recién restaurada. No debe repetirse sobre la misma base sin restaurarla previamente, porque los datos residuales pueden alterar el resultado.
