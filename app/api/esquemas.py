@@ -34,3 +34,26 @@ class CambioEstadoAlerta(BaseModel):
 class ActivacionModelo(BaseModel):
     usuario: str = Field(min_length=1, max_length=100)
     motivo: str = Field(min_length=3, max_length=500)
+
+
+# ------------------------------------------------------------------ errores (solo documentación OpenAPI)
+# Reflejan app/core/errores.py: cuerpo_error() siempre escribe las cuatro claves.
+
+
+class DetalleCampo(BaseModel):
+    campo: str = Field(description="Ubicación del dato inválido, p. ej. 'body.idrutas.0'")
+    mensaje: str = Field(description="Motivo informado por la validación")
+
+
+class CuerpoError(BaseModel):
+    codigo: str = Field(description="solicitud_invalida (422), no_encontrado (404), conflicto (409) "
+                                    "o error_interno (500)")
+    mensaje: str
+    detalle: list[DetalleCampo] | None = Field(
+        description="Campos inválidos en los errores de validación; null en los demás")
+    correlation_id: str = Field(description="Identificador de correlación asociado a la solicitud")
+
+
+class ErrorRespuesta(BaseModel):
+    """Formato uniforme de error de la API (app/core/errores.py: cuerpo_error)."""
+    error: CuerpoError
