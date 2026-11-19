@@ -252,6 +252,7 @@ FILTROS_CALIDAD = {
     "regla": "e.regla",
     "tabla_origen": "e.tabla_origen",
     "reglas_version": "e.reglas_version",
+    "causa": "d.causa",
 }
 
 _FROM_CALIDAD = ("FROM ai_frecuencias.data_quality_deteccion d "

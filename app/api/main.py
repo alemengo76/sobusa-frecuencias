@@ -216,6 +216,7 @@ def listar_errores_calidad(lote: str = Query(..., min_length=1, max_length=120),
                            regla: str | None = Query(None, min_length=1, max_length=100),
                            tabla_origen: str | None = Query(None, min_length=1, max_length=100),
                            reglas_version: str | None = Query(None, min_length=1, max_length=50),
+                           causa: str | None = Query(None, min_length=1),
                            pagina_n: int = Pagina, tamano: int = Tamano):
     """Errores de calidad de un lote, con el evento deduplicado al que pertenece cada detección.
 
@@ -224,7 +225,7 @@ def listar_errores_calidad(lote: str = Query(..., min_length=1, max_length=120),
     with consultar_resultados() as c:
         filas, total = repo.errores_calidad_por_lote(
             c, lote, alcance, {"idruta": idruta, "regla": regla, "tabla_origen": tabla_origen,
-                               "reglas_version": reglas_version},
+                               "reglas_version": reglas_version, "causa": causa},
             pagina_n, tamano)
     return pagina(filas, total, pagina_n, tamano)
 

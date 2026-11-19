@@ -126,6 +126,30 @@ error ya registrado (2.324 grupos). Además, los faltantes se guardaban como el 
   y el `id` máximo, en el upgrade y en el downgrade.
 - Pendiente (E12): marcar como "resuelto" un evento cuando el viaje releído deja de incumplir.
 
+### Consulta de errores de calidad por lote (G3)
+
+- Se conserva el endpoint `GET /api/v1/quality/errors`, bajo la ruta
+  `/api/v1/quality`, sin crear una ruta alternativa `/api/v1/data-quality/errors`.
+- La consulta se realiza sobre las detecciones (`data_quality_deteccion`),
+  relacionadas con su evento (`data_quality_error`). Un lote se consulta a
+  partir de sus detecciones.
+- Se admiten los filtros `idruta`, `regla`, `tabla_origen`,
+  `reglas_version` y `causa`. Los filtros son independientes y pueden
+  combinarse; cuando se usan varios, todos deben cumplirse.
+- **Decisión aprobada por Alejandra:** incorporar `causa` como filtro
+  opcional e independiente para permitir consultar las detecciones por su causa específica.
+  Se utiliza `d.causa`, correspondiente a la causa de cada detección,
+  y no `e.causa`, que conserva la causa de la primera detección del evento.
+- La comparación de `causa` es exacta, no parcial. El texto depende de la
+  versión de las reglas y de la descripción asociada a cada regla; por tanto,
+  causas de distintas versiones pueden tener textos diferentes.
+- `alcance=ventana` consulta el lote exacto. `alcance=ejecucion` consulta
+  solo sus ventanas: el lote seguido de `_` y al menos tres dígitos, sin
+  incluir el lote exacto. `alcance=auto` combina ambos criterios. Los filtros adicionales
+  se aplican al resultado de ese alcance, no forman parte de su condición OR.
+- No se requiere una migración para incorporar el filtro `causa`: la columna
+  ya existe en `data_quality_deteccion`.
+
 ## 9. Hallazgos en los scripts de Extreme (para comunicarles)
 
 1. `fn_insert_timbradas_anio`, paso 10: al restar la contribución anterior no filtra por
