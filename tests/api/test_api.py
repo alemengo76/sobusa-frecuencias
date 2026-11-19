@@ -104,7 +104,9 @@ def test_error_inesperado_no_filtra_detalles(_):
 # ------------------------------------------------------------------ G3: GET /quality/errors
 
 URL_CALIDAD = "/api/v1/quality/errors"
-SIN_FILTROS = {"idruta": None, "regla": None, "tabla_origen": None, "reglas_version": None}
+SIN_FILTROS = {"idruta": None, "regla": None, "tabla_origen": None, "reglas_version": None,
+               "causa": None}
+CAUSA = "más de N pasajeros en un viaje (texto sintético)"
 FILA_CALIDAD = {  # datos sintéticos con los 15 campos de ErrorCalidad
     "deteccion_id": 7, "evento_id": 3, "lote": "ingesta_20261119T080000_001",
     "detectado_en": datetime(2026, 11, 19, 8, 0, 5), "idruta": 16,
@@ -151,8 +153,31 @@ def test_errores_calidad_filtros_y_paginacion_llegan_al_repositorio(repo_calidad
     assert repo_calidad.call_args.args[1:] == (
         "ingesta_20261119T080000", "ejecucion",
         {"idruta": 21, "regla": "regla_sintetica", "tabla_origen": "progvehiculos",
-         "reglas_version": "comun-1.5"},
+         "reglas_version": "comun-1.5", "causa": None},
         4, 20)
+
+
+@patch("app.api.main.consultar_resultados", conexion_falsa)
+@patch("app.api.main.repo.errores_calidad_por_lote", return_value=([], 0))
+def test_errores_calidad_filtro_causa(repo_calidad):
+    r = cliente.get(URL_CALIDAD, params={"lote": "L", "causa": CAUSA})
+    assert r.status_code == 200
+    assert repo_calidad.call_args.args[1:] == ("L", "auto", {**SIN_FILTROS, "causa": CAUSA}, 1, 50)
+
+
+@patch("app.api.main.consultar_resultados", conexion_falsa)
+@patch("app.api.main.repo.errores_calidad_por_lote", return_value=([], 0))
+def test_errores_calidad_filtro_causa_con_regla(repo_calidad):
+    r = cliente.get(URL_CALIDAD, params={"lote": "L", "regla": "pasajeros_extremo", "causa": CAUSA})
+    assert r.status_code == 200
+    assert repo_calidad.call_args.args[3] == {**SIN_FILTROS, "regla": "pasajeros_extremo", "causa": CAUSA}
+
+
+@patch("app.api.main.repo.errores_calidad_por_lote")
+def test_errores_calidad_causa_vacia_da_422(repo_calidad):
+    r = cliente.get(URL_CALIDAD, params={"lote": "L", "causa": ""})
+    assert r.status_code == 422 and r.json()["error"]["codigo"] == "solicitud_invalida"
+    repo_calidad.assert_not_called()
 
 
 @pytest.mark.parametrize("alcance", ["auto", "ejecucion", "ventana"])

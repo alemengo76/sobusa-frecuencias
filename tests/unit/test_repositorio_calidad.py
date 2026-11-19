@@ -17,7 +17,9 @@ EJECUCION = ("(starts_with(d.lote, CAST(:lote AS text))"
 FROM_JOIN = ("FROM ai_frecuencias.data_quality_deteccion d "
              "JOIN ai_frecuencias.data_quality_error e ON e.id = d.evento_id")
 COLUMNA = {"idruta": "d.idruta", "regla": "e.regla",
-           "tabla_origen": "e.tabla_origen", "reglas_version": "e.reglas_version"}
+           "tabla_origen": "e.tabla_origen", "reglas_version": "e.reglas_version",
+           "causa": "d.causa"}
+CAUSA = "más de N pasajeros en un viaje (texto sintético)"
 
 
 class _Resultado:
@@ -182,6 +184,31 @@ def test_auto_agrupa_el_or_antes_de_los_filtros():
     assert ors and all(profundidad(w, i) >= 1 for i in ors), "el OR debe quedar dentro del paréntesis"
     for filtro in (" AND d.idruta = :idruta", " AND e.regla = :regla"):
         assert profundidad(w, w.index(filtro)) == 0, "los filtros deben quedar fuera del OR"
+
+
+def test_filtros_calidad_son_los_cinco_esperados_en_orden():
+    assert repo.FILTROS_CALIDAD == COLUMNA
+    assert list(repo.FILTROS_CALIDAD) == ["idruta", "regla", "tabla_origen", "reglas_version", "causa"]
+
+
+def test_filtro_causa_individual_en_conteo_y_pagina():
+    _, sql_conteo, p_conteo, sql_pagina, p_pagina = ejecutar(alcance="ventana", filtros={"causa": CAUSA})
+    esperado = f"WHERE {VENTANA} AND d.causa = :causa"
+    assert where_de(sql_conteo) == esperado and where_de(sql_pagina) == esperado
+    assert p_conteo == {"lote": "ingesta_20261119T080000", "causa": CAUSA}
+    assert p_pagina == {**p_conteo, "lim": 50, "off": 0}
+    assert CAUSA not in sql_conteo and CAUSA not in sql_pagina
+
+
+def test_filtro_causa_combinado_con_regla_en_conteo_y_pagina():
+    _, sql_conteo, p_conteo, sql_pagina, p_pagina = ejecutar(
+        alcance="auto", filtros={"causa": CAUSA, "regla": "pasajeros_extremo"}, pagina=2, tamano=10)
+    esperado = "WHERE " + repo.COND_LOTE["auto"] + " AND e.regla = :regla AND d.causa = :causa"
+    assert where_de(sql_conteo) == esperado and where_de(sql_pagina) == esperado
+    assert p_conteo == {"lote": "ingesta_20261119T080000", "regla": "pasajeros_extremo", "causa": CAUSA}
+    assert p_pagina == {**p_conteo, "lim": 10, "off": 10}
+    for filtro in (" AND e.regla = :regla", " AND d.causa = :causa"):
+        assert profundidad(esperado, esperado.index(filtro)) == 0, "los filtros deben quedar fuera del OR"
 
 
 # ------------------------------------------------------------------ conteo y página
