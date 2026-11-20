@@ -1,5 +1,5 @@
 """Esquemas de entrada de la API (validados por Pydantic y publicados en OpenAPI 3)."""
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -57,3 +57,38 @@ class CuerpoError(BaseModel):
 class ErrorRespuesta(BaseModel):
     """Formato uniforme de error de la API (app/core/errores.py: cuerpo_error)."""
     error: CuerpoError
+
+
+# ------------------------------------------------------------------ G3: errores de calidad por lote (respuesta)
+# Misma forma que pagina() en app/api/main.py: {"datos": [...], "paginacion": {...}}.
+
+
+class Paginacion(BaseModel):
+    pagina: int = Field(description="Página devuelta (desde 1)")
+    tamano: int = Field(description="Filas por página solicitadas (1 a 500)")
+    total: int = Field(description="Filas que cumplen los filtros; 0 si no hay resultados")
+    paginas: int = Field(description="Número de páginas; 0 si no hay resultados")
+
+
+class ErrorCalidad(BaseModel):
+    """Una detección de un evento de calidad en un lote (data_quality_deteccion + data_quality_error)."""
+    deteccion_id: int = Field(description="Identificador de la detección (data_quality_deteccion.id)")
+    evento_id: int = Field(description="Evento de calidad detectado (data_quality_error.id)")
+    lote: str = Field(description="Lote de la ventana en que se detectó")
+    detectado_en: datetime = Field(description="Momento de la detección")
+    idruta: int | None = Field(description="Ruta informada en esta detección")
+    causa: str = Field(description="Descripción de la regla incumplida en esta detección")
+    valor_original: str | None = Field(description="Valor tal como llegó; conserva 'NaN' o 'nan'")
+    tabla_origen: str = Field(description="Tabla de la fuente, p. ej. 'progvehiculos'")
+    idprogramacion: int = Field(description="Fila de la fuente (idprogramacion)")
+    regla: str = Field(description="Código de la regla incumplida")
+    reglas_version: str = Field(description="Versión de las reglas, p. ej. 'comun-1.5'")
+    valor_normalizado: str | None = Field(description="Valor del evento; un faltante es null")
+    primer_lote: str = Field(description="Lote de la primera detección del evento")
+    primera_deteccion: datetime = Field(description="Momento de la primera detección del evento")
+    nuevo_en_lote: bool = Field(description="true si este lote es el de la primera detección del evento")
+
+
+class PaginaErroresCalidad(BaseModel):
+    datos: list[ErrorCalidad]
+    paginacion: Paginacion
