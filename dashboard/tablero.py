@@ -1,5 +1,8 @@
 """Tablero mínimo (Streamlit) que consume la API: predicción, recomendación y alertas.
 
+Predicción (RF-006) y recomendación (RF-015) muestran un solo día, una sola ruta, un solo horizonte,
+una sola ejecución y un solo modelo a la vez, con los valores tal como los devuelve la API.
+
 Uso:  streamlit run dashboard/tablero.py   (con la API corriendo en http://localhost:8000)
 """
 import os
@@ -7,6 +10,11 @@ import os
 import pandas as pd
 import requests
 import streamlit as st
+
+try:                                   # pytest y python -m importan el paquete dashboard
+    from dashboard import explicacion as xp
+except ModuleNotFoundError:            # streamlit run agrega dashboard/ a sys.path, no la raíz
+    import explicacion as xp
 
 API = os.environ.get("API_URL", "http://localhost:8000/api/v1")
 NOMBRES = {2: "2 · SILENCIO", 16: "16 · CRA 54", 21: "21 · CALLE 72"}
@@ -22,6 +30,213 @@ def traer(ruta: str, **params) -> pd.DataFrame:
     return pd.DataFrame(r.json()["datos"])
 
 
+def _get(ruta: str, params) -> dict:
+    """Adaptador HTTP de solo lectura: lanza ante errores HTTP y devuelve el JSON."""
+    r = requests.get(f"{API}/{ruta}", params=params, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
+def _leer(ruta: str, params: dict, columna_id: str) -> list[dict] | None:
+    """Todas las filas, o None (con el error ya mostrado) si la lectura falla o no es coherente."""
+    try:
+        return xp.leer_paginas(_get, ruta, params, columna_id)
+    except xp.ErrorLectura as e:
+        st.error(f"No se pudieron leer {ruta}: {e}")
+    except requests.exceptions.JSONDecodeError:
+        st.error(f"No se pudieron leer {ruta}: la API no devolvió JSON válido.")
+    except requests.RequestException as e:
+        st.error(f"No se pudieron leer {ruta}: error de comunicación con la API ({type(e).__name__}).")
+    except ValueError:
+        st.error(f"No se pudieron leer {ruta}: la API no devolvió JSON válido.")
+    return None
+
+
+def _ejecucion(eid: str) -> dict | None:
+    """GET /frequency/executions/{id}; None (con aviso) si no se puede consultar."""
+    try:
+        return _get(f"frequency/executions/{eid}", {})
+    except (requests.RequestException, ValueError) as e:
+        st.warning(f"No se pudo consultar la ejecución {eid} ({type(e).__name__}).")
+        return None
+
+
+def _elegir_ejecucion(grupo, etiqueta: str, clave: str) -> str:
+    """Una sola ejecución: la más reciente por defecto, o la que elija el usuario si hay varias."""
+    if not grupo.por_fecha:
+        st.warning(f"No se pudieron ordenar las ejecuciones por fecha ({grupo.motivo}); se listan por "
+                   "identificador.")
+    if len(grupo.lista) == 1:
+        return grupo.lista[0].execution_id
+    st.warning(f"Hay {len(grupo.lista)} ejecuciones con datos para este día; se muestra solo una.")
+    etiquetas = {e.execution_id: f"{e.execution_id} · generada "
+                                 f"{e.generada_hasta or 'sin fecha comparable'} · {e.filas} filas"
+                 for e in grupo.lista}
+    return st.selectbox(etiqueta, list(etiquetas), key=clave, format_func=etiquetas.get)
+
+
+def _sin_otros_filtros(filas: list[dict]) -> list[dict]:
+    """Descarta (y avisa) filas de otra ruta u horizonte; la API ya filtra, es una defensa."""
+    ajenas = xp.fuera_de_filtro(filas, idruta, horizonte)
+    if ajenas:
+        st.warning(f"Se descartaron {ajenas} filas de otra ruta u horizonte.")
+    return [f for f in filas if str(f.get("idruta")) == str(idruta)
+            and str(f.get("horizonte_min")) == str(horizonte)]
+
+
+def _por_franja(df: pd.DataFrame) -> pd.DataFrame | None:
+    """df ordenado e indexado por franja_inicio, o None (con aviso) si las fechas no son homogéneas."""
+    try:
+        franjas = pd.to_datetime(df.franja_inicio)
+    except (TypeError, ValueError):
+        st.warning("Las franjas mezclan fechas con y sin zona horaria o no son legibles; no se grafican.")
+        return None
+    return df.assign(franja_inicio=franjas).sort_values("franja_inicio").set_index("franja_inicio")
+
+
+def mostrar_predicciones(filtros: dict) -> None:
+    """RF-006: predicción puntual, límites, nivel y versión del modelo de una sola ejecución y modelo."""
+    filas = _leer("predictions", filtros, "prediction_id")
+    if filas is None:
+        return
+    filas = _sin_otros_filtros(filas)
+    if not filas:
+        st.info(f"Sin predicciones para la ruta {NOMBRES[idruta]}, horizonte {horizonte} min, "
+                f"día {dia_txt}.")
+        return
+    eid = _elegir_ejecucion(xp.separar_ejecuciones(filas), "Ejecución de predicción",
+                            "ejecucion_prediccion")
+    de_eid = xp.de_ejecucion(filas, eid)
+    otras_ejecuciones, filas = len(filas) - len(de_eid), de_eid
+
+    ocultas: list[dict] = []
+    modelos = xp.modelos(filas)
+    if len(modelos) > 1:
+        st.warning("Esta ejecución tiene filas de más de un modelo; se muestra un modelo a la vez.")
+        etiquetas = {mid: f"{ver} (model_id {mid}, {n} filas)" for mid, ver, n in modelos}
+        modelo = st.selectbox("Modelo", list(etiquetas), format_func=etiquetas.get,
+                              key="modelo_prediccion")
+        ocultas = xp.ocultas_por_modelo(filas, modelo)
+        filas = xp.de_modelo(filas, modelo)
+    st.caption(f"Ejecución de predicciones: {eid} · {len(filas)} franjas mostradas · descartadas: "
+               f"{otras_ejecuciones} filas de otras ejecuciones y {len(ocultas)} de otros modelos.")
+    if ocultas:
+        st.warning(f"{len(ocultas)} franjas de esta ejecución quedan fuera por ser de otro modelo:")
+        st.dataframe(pd.DataFrame(ocultas))
+
+    ejecucion = _ejecucion(eid)
+    respaldo = xp.respaldo_registrado(ejecucion)
+    if respaldo is not None:
+        st.write("Modelo y respaldo registrados en el resumen de la ejecución:")
+        st.json(respaldo)
+    elif ejecucion is not None:
+        st.caption("El resumen de la ejecución no registra el modelo activo ni el respaldo.")
+
+    p = _por_franja(pd.DataFrame(filas))
+    if p is not None:
+        st.line_chart(p[["limite_inferior", "demanda_pred", "limite_superior"]].astype(float))
+
+    unicos = {c: xp.valores_unicos(filas, c) for c in
+              ("model_version", "model_id", "feature_version", "data_cutoff", "nivel_intervalo")}
+    st.caption(" · ".join(f"{c}: {', '.join(str(v) for v in vs)}" for c, vs in unicos.items()))
+    for c in ("data_cutoff", "nivel_intervalo", "feature_version"):
+        if len(unicos[c]) > 1:
+            st.warning(f"{c} no es único en esta ejecución: {', '.join(str(v) for v in unicos[c])}.")
+
+    conteo = xp.resumen_intervalos(filas)
+    st.dataframe(pd.DataFrame([{"clasificación": xp.ETIQUETA_INTERVALO[c], "franjas": n,
+                                "significado": xp.DESCRIPCION_INTERVALO[c]}
+                               for c, n in conteo.items()]))
+    if conteo.get(xp.COLAPSADO):
+        st.warning(f"{conteo[xp.COLAPSADO]} franjas con intervalo colapsado: no informan "
+                   "incertidumbre.")
+    for limitacion in xp.LIMITACIONES_PREDICCION:
+        st.caption(limitacion)
+    columnas = ["franja_inicio", "demanda_pred", "limite_inferior", "limite_superior",
+                "nivel_intervalo", "model_version"]
+    st.dataframe(pd.DataFrame(filas)[columnas])
+
+
+def _predicciones_asociadas(eid: str, filtros: dict) -> tuple[str | None, list[dict], str | None]:
+    """(execution_id de predicción, sus filas, motivo si no hay filas utilizables). Nunca usa filas de
+    otra ejecución."""
+    ejecucion = _ejecucion(eid)
+    if ejecucion is None:
+        return None, [], "no se pudo consultar la ejecución de recomendaciones"
+    eid_pred = xp.ejecucion_prediccion_asociada(ejecucion)
+    if eid_pred is None:
+        st.warning(f"La ejecución {eid} no indica de qué ejecución de predicciones salió.")
+        return None, [], "la ejecución de recomendaciones no indica su ejecución de predicciones"
+    leidas = _leer("predictions", {**filtros, "execution_id": eid_pred}, "prediction_id")
+    if leidas is None:
+        return eid_pred, [], "no se pudieron leer las predicciones de la ejecución asociada"
+    propias = xp.de_ejecucion(_sin_otros_filtros(leidas), eid_pred)
+    if len(propias) != len(leidas):
+        st.warning(f"Se descartaron {len(leidas) - len(propias)} predicciones que no son de la "
+                   f"ejecución {eid_pred}.")
+    if not propias:
+        st.warning(f"La ejecución de predicciones asociada ({eid_pred}) no tiene predicciones "
+                   "guardadas para esta ruta, horizonte y día. No se completan con datos de otra "
+                   "ejecución.")
+        return eid_pred, [], xp.SIN_PREDICCIONES
+    return eid_pred, propias, None
+
+
+def mostrar_recomendaciones(filtros: dict) -> None:
+    """RF-008 (actual vs recomendada) y RF-015 (explicación) de una sola ejecución."""
+    filas = _leer("recommendations", filtros, "recommendation_id")
+    if filas is None:
+        return
+    filas = _sin_otros_filtros(filas)
+    if not filas:
+        st.info(f"Sin recomendaciones para la ruta {NOMBRES[idruta]}, horizonte {horizonte} min, "
+                f"día {dia_txt}.")
+        return
+    eid = _elegir_ejecucion(xp.separar_ejecuciones(filas), "Ejecución de recomendación",
+                            "ejecucion_recomendacion")
+    de_eid = xp.de_ejecucion(filas, eid)
+    otras_ejecuciones, filas = len(filas) - len(de_eid), de_eid
+    eid_pred, predicciones, motivo = _predicciones_asociadas(eid, filtros)
+    st.caption(f"Ejecución de recomendaciones: {eid} · {len(filas)} franjas mostradas · descartadas: "
+               f"{otras_ejecuciones} filas de otras ejecuciones · ejecución de predicciones asociada: "
+               f"{eid_pred or 'no disponible'}.")
+
+    r = _por_franja(pd.DataFrame(filas))
+    if r is not None:
+        st.bar_chart(r[["buses_hora_actual", "buses_hora_recomendado"]].astype(float))
+    no_viables = [f for f in filas if f.get("es_viable") is False]
+    if no_viables:
+        st.warning(f"{len(no_viables)} franjas no viables")
+        st.dataframe(pd.DataFrame(no_viables)[["franja_inicio", "vehiculos_requeridos", "flota_tope",
+                                               "motivo_no_viable"]])
+
+    st.subheader("Explicación de la recomendación")
+    por_franja = {str(f["franja_inicio"]): f for f in sorted(filas, key=lambda f: str(f["franja_inicio"]))}
+    if len(por_franja) != len(filas):
+        st.warning("La ejecución tiene más de una recomendación para la misma franja; no se explica "
+                   "para no elegir una arbitrariamente.")
+        return
+    franja = st.selectbox("Franja a explicar", list(por_franja), key="franja_explicada")
+    rec = por_franja[franja]
+    asociacion = xp.prediccion_para(rec, predicciones) if motivo is None else xp.Asociacion(None, motivo)
+    if asociacion.prediccion is not None:
+        st.caption(f"Predicción de entrada: prediction_id {asociacion.prediccion.get('prediction_id')} "
+                   f"de la ejecución {eid_pred}.")
+    elif motivo is None:          # los motivos de la ejecución ya se avisaron arriba
+        st.warning("No se asoció una predicción a esta franja: "
+                   f"{xp.MOTIVO_NO_ASOCIADA.get(asociacion.motivo, asociacion.motivo)}.")
+    exp = xp.explicar_recomendacion(rec, asociacion.prediccion, asociacion.motivo)
+    for linea in exp["regla"]:
+        st.write(linea)
+    if exp["motivo"]:
+        st.warning(f"Motivo de no viabilidad: {exp['motivo']}")
+    st.dataframe(pd.DataFrame(exp["pasos"]))
+    st.caption("Valores tal como los devolvió la API; el tablero no los recalcula.")
+    st.caption("No disponibles en la API: " + " ".join(exp["no_disponibles"]))
+    st.caption("Las variables son las de la regla de recomendación. La API no ofrece explicación "
+               "local de las variables del modelo de demanda.")
+
+
 with st.sidebar:
     idruta = st.selectbox("Ruta", list(NOMBRES), format_func=NOMBRES.get, index=1)
     horizonte = st.radio("Horizonte (min)", [30, 60, 120], index=1, horizontal=True)
@@ -32,31 +247,15 @@ with st.sidebar:
         st.write(r.json())
 
 pestanas = st.tabs(["Demanda prevista", "Frecuencia recomendada", "Alertas"])
+desde, hasta = xp.rango_dia(dia)
+dia_txt = desde[:10]
+filtros_dia = {"idruta": idruta, "horizonte_min": horizonte, "desde": desde, "hasta": hasta}
 
 with pestanas[0]:
-    p = traer("predictions", idruta=idruta, horizonte_min=horizonte, tamano=500)
-    if p.empty:
-        st.info("Sin predicciones todavía.")
-    else:
-        p["franja_inicio"] = pd.to_datetime(p.franja_inicio)
-        p = p.sort_values("franja_inicio").set_index("franja_inicio")
-        st.line_chart(p[["limite_inferior", "demanda_pred", "limite_superior"]].astype(float))
-        st.caption(f"Modelo {p.model_version.iloc[-1]} · datos hasta {p.data_cutoff.iloc[-1]}")
+    mostrar_predicciones(filtros_dia)
 
 with pestanas[1]:
-    r = traer("recommendations", idruta=idruta, horizonte_min=horizonte, tamano=500)
-    if r.empty:
-        st.info("Sin recomendaciones todavía.")
-    else:
-        r["franja_inicio"] = pd.to_datetime(r.franja_inicio)
-        r = r.sort_values("franja_inicio")
-        st.bar_chart(r.set_index("franja_inicio")[["buses_hora_actual", "buses_hora_recomendado"]]
-                     .astype(float))
-        no_viables = r[~r.es_viable]
-        if len(no_viables):
-            st.warning(f"{len(no_viables)} franjas no viables")
-            st.dataframe(no_viables[["franja_inicio", "vehiculos_requeridos", "flota_tope",
-                                     "motivo_no_viable"]])
+    mostrar_recomendaciones(filtros_dia)
 
 with pestanas[2]:
     estado = st.selectbox("Estado", ["abierta", "reconocida", "asignada", "cerrada", "descartada"])
