@@ -5,6 +5,7 @@ Todas las consultas usan parámetros enlazados (nunca f-strings con datos del us
 import json
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 import pandas as pd
 from sqlalchemy import text
@@ -115,26 +116,79 @@ def umbrales_vigentes(c) -> dict:
 
 # ------------------------------------------------------------------ escritura de resultados
 
-def insertar_predicciones(c, eid: str, model_id: int, df: pd.DataFrame) -> int:
-    """model_id: el del modelo activo; si df trae su propia columna model_id (filas del respaldo),
-    se respeta fila por fila."""
+class PrediccionesNoGuardadas(RuntimeError):
+    """La base no guardó exactamente las predicciones enviadas: la transacción debe revertirse."""
+
+
+_COLUMNAS_PREDICCION_BD = (
+    ("idruta", "integer"), ("sentido", "text"), ("segmento_id", "text"), ("franja_inicio", "timestamp"),
+    ("franja_minutos", "integer"), ("horizonte_min", "integer"), ("demanda_pred", "numeric"),
+    ("limite_inferior", "numeric"), ("limite_superior", "numeric"), ("nivel_intervalo", "numeric"),
+    ("definicion_tiempo", "text"), ("model_id", "integer"), ("model_version", "text"),
+    ("feature_version", "text"), ("data_cutoff", "timestamp"), ("latency_ms", "integer"),
+)
+
+
+def _valor_json(v):
+    if isinstance(v, Decimal):
+        return format(v, "f")               # exacto: ya viene redondeado a 2 decimales
+    if isinstance(v, (pd.Timestamp, datetime)):
+        return pd.Timestamp(v).strftime("%Y-%m-%dT%H:%M:%S")
+    if hasattr(v, "item"):                  # escalares de numpy
+        return v.item()
+    return v
+
+
+def insertar_predicciones(c, eid: str, df: pd.DataFrame) -> int:
+    """Inserta TODAS las filas de df (de contrato.normalizar_predicciones) con execution_id = eid, en una
+    sola sentencia con RETURNING. Sin ON CONFLICT: un choque es un error y revierte la transacción.
+    Si la base no devuelve exactamente len(df) filas, lanza PrediccionesNoGuardadas."""
+    if df.empty:
+        raise PrediccionesNoGuardadas("no hay predicciones para guardar")
     if "model_id" not in df.columns:
-        df = df.assign(model_id=model_id)
-    # astype(object): psycopg no sabe adaptar numpy.int64
-    filas = df.assign(execution_id=eid).astype(object).to_dict("records")
-    if not filas:
-        return 0
-    c.execute(text("""
-        INSERT INTO prediction (execution_id, idruta, sentido, segmento_id, franja_inicio,
-            franja_minutos, horizonte_min, demanda_pred, limite_inferior, limite_superior,
-            nivel_intervalo, definicion_tiempo, model_id, model_version, feature_version,
-            data_cutoff, latency_ms)
-        VALUES (:execution_id, :idruta, :sentido, :segmento_id, :franja_inicio, :franja_minutos,
-            :horizonte_min, :demanda_pred, :limite_inferior, :limite_superior, :nivel_intervalo,
-            :definicion_tiempo, :model_id, :model_version, :feature_version, :data_cutoff, :latency_ms)
-        ON CONFLICT (idruta, sentido, segmento_id, franja_inicio, horizonte_min, model_id, data_cutoff)
-        DO NOTHING"""), filas)
-    return len(filas)
+        raise PrediccionesNoGuardadas("cada predicción debe traer el model_id que la produjo")
+    columnas = [n for n, _ in _COLUMNAS_PREDICCION_BD]
+    filas = [{k: _valor_json(v) for k, v in zip(columnas, fila, strict=True)}
+             for fila in df[columnas].itertuples(index=False, name=None)]
+    tipos = ", ".join(f"{n} {t}" for n, t in _COLUMNAS_PREDICCION_BD)
+    devueltas = c.execute(text(f"""
+        INSERT INTO prediction (execution_id, {", ".join(columnas)})
+        SELECT CAST(:eid AS uuid), {", ".join(columnas)}
+        FROM jsonb_to_recordset(CAST(:filas AS jsonb)) AS f({tipos})
+        RETURNING prediction_id"""), {"eid": eid, "filas": json.dumps(filas)}).all()
+    if len(devueltas) != len(df):
+        raise PrediccionesNoGuardadas(f"se enviaron {len(df)} predicciones y la base devolvió {len(devueltas)}")
+    return len(devueltas)
+
+
+def reservar_conjunto(c, huella: str, eid: str, filas: int, formato: str) -> bool:
+    """True si esta ejecución queda como dueña de la huella; False si otra ya lo es.
+
+    Si otra transacción reservó la misma huella y no ha terminado, PostgreSQL hace esperar a esta
+    sentencia (clave primaria) hasta que la otra confirme (-> False) o se revierta (-> True)."""
+    return c.execute(text("""
+        INSERT INTO prediction_set (huella, execution_id, formato, filas)
+        VALUES (:h, CAST(:e AS uuid), :f, :n)
+        ON CONFLICT (huella) DO NOTHING
+        RETURNING execution_id"""), {"h": huella, "e": eid, "f": formato, "n": filas}).scalar() is not None
+
+
+def duena_conjunto(c, huella: str) -> str:
+    eid = c.execute(text("SELECT execution_id::text FROM prediction_set WHERE huella = :h"),
+                    {"h": huella}).scalar()
+    if eid is None:
+        raise PrediccionesNoGuardadas(f"la huella {huella[:12]}… no tiene ejecución dueña")
+    return eid
+
+
+def ejecucion_duena(c, eid: str) -> str | None:
+    """Ejecución que tiene las filas de la ejecución de predicción eid: ella misma o la que reutiliza.
+    None si eid no existe."""
+    fila = c.execute(text("SELECT resumen->>'reutiliza' FROM ai_frecuencias.execution_log "
+                          "WHERE execution_id = CAST(:e AS uuid)"), {"e": eid}).first()
+    if fila is None:
+        return None
+    return fila[0] or eid
 
 
 def insertar_recomendaciones(c, eid: str, df: pd.DataFrame) -> int:
@@ -260,3 +314,64 @@ def ultima_carga_viajes(c, idruta: int, desde: datetime, hasta: datetime):
         """SELECT max(cargado_en) FROM ai_frecuencias.viaje_fuente
            WHERE idruta = :r AND fechasalida >= :d AND fechasalida < :h"""),
         {"r": idruta, "d": desde, "h": hasta}).scalar()
+
+
+# ------------------------------------------------------------------ G3: errores de calidad por lote
+
+# Condición de lote según el alcance. Cada una va COMPLETA entre paréntesis: los filtros opcionales
+# se agregan con AND y, sin el paréntesis exterior de "auto", AND (que precede a OR) se aplicaría
+# solo a la rama por ejecución. Sufijo de ventana: "_" + tres o más dígitos ASCII (app/ingesta.py,
+# f"{lote}_{i:03d}"). Cadenas normales, no f-strings: las llaves de {3,} deben llegar tal cual.
+COND_LOTE = {
+    "ventana": "(d.lote = CAST(:lote AS text))",
+    "ejecucion": ("(starts_with(d.lote, CAST(:lote AS text))"
+                  " AND substr(d.lote, char_length(CAST(:lote AS text)) + 1) ~ '^_[0123456789]{3,}$')"),
+}
+COND_LOTE["auto"] = "(" + COND_LOTE["ventana"] + " OR " + COND_LOTE["ejecucion"] + ")"
+
+# Filtro público -> columna (constantes; el valor del usuario solo viaja como parámetro enlazado).
+FILTROS_CALIDAD = {
+    "idruta": "d.idruta",
+    "regla": "e.regla",
+    "tabla_origen": "e.tabla_origen",
+    "reglas_version": "e.reglas_version",
+    "causa": "d.causa",
+}
+
+_FROM_CALIDAD = ("FROM ai_frecuencias.data_quality_deteccion d "
+                 "JOIN ai_frecuencias.data_quality_error e ON e.id = d.evento_id")
+
+_COLUMNAS_CALIDAD = (
+    "d.id AS deteccion_id, d.evento_id AS evento_id, d.lote AS lote, d.detectado_en AS detectado_en, "
+    "d.idruta AS idruta, d.causa AS causa, d.valor_original AS valor_original, "
+    "e.tabla_origen AS tabla_origen, e.idprogramacion AS idprogramacion, e.regla AS regla, "
+    "e.reglas_version AS reglas_version, e.valor AS valor_normalizado, e.lote AS primer_lote, "
+    "e.creado_en AS primera_deteccion, (e.lote = d.lote) AS nuevo_en_lote"
+)
+
+
+def errores_calidad_por_lote(c, lote: str, alcance: str, filtros: dict | None,
+                             pagina: int = 1, tamano: int = 50) -> tuple[list[dict], int]:
+    """Detecciones de calidad de un lote (G3), paginadas, con su evento.
+
+    alcance: 'ventana' (lote exacto), 'ejecucion' (ventanas del lote: prefijo literal + '_' y 3 o
+    más dígitos ASCII) o 'auto' (ambas). El lote se usa tal cual: sin strip ni escape.
+    Devuelve (filas, total); el conteo usa exactamente el mismo FROM, JOIN y WHERE."""
+    if alcance not in COND_LOTE:
+        raise ValueError(f"alcance no válido: {alcance!r}")
+    filtros = filtros or {}
+    desconocidos = set(filtros) - set(FILTROS_CALIDAD)
+    if desconocidos:
+        raise ValueError(f"filtros no permitidos: {sorted(desconocidos)}")
+    condiciones, params = [COND_LOTE[alcance]], {"lote": lote}
+    for clave, columna in FILTROS_CALIDAD.items():
+        valor = filtros.get(clave)
+        if valor is not None:
+            condiciones.append(f"{columna} = :{clave}")
+            params[clave] = valor
+    where = "WHERE " + " AND ".join(condiciones)          # se arma UNA vez
+    total = c.execute(text(f"SELECT count(*) {_FROM_CALIDAD} {where}"), params).scalar()
+    filas = c.execute(text(f"SELECT {_COLUMNAS_CALIDAD} {_FROM_CALIDAD} {where} "
+                           "ORDER BY d.id DESC LIMIT :lim OFFSET :off"),
+                      {**params, "lim": tamano, "off": (pagina - 1) * tamano}).mappings()
+    return [dict(f) for f in filas], int(total)

@@ -2,16 +2,18 @@
 import logging
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app import servicios
+from app import evaluacion_real, servicios
 from app.api.esquemas import (ActivacionModelo, CambioEstadoAlerta, ErrorRespuesta, ExplicacionPrediccion,
-                              SolicitudFrecuencias, SolicitudPrediccion, SolicitudRecomendacion)
+                              PaginaErroresCalidad, SolicitudFrecuencias, SolicitudPrediccion,
+                              SolicitudRecomendacion)
 from app.core.config import obtener_config
-from app.core.errores import ErrorAPI, NoEncontrado, cuerpo_error
+from app.core.errores import ErrorAPI, NoEncontrado, SolicitudInvalida, cuerpo_error
 from app.core.registro import configurar_logs, correlation_id
 from app.db import repositorio as repo
 from app.db.conexion import consultar_resultados, escribir
@@ -70,6 +72,7 @@ def _dia(d) -> datetime:
 
 Pagina = Query(1, ge=1, alias="pagina")
 Tamano = Query(50, ge=1, le=500)
+AgruparPor = Query(["idruta", "horizonte_min"])
 
 # Respuestas de error documentadas en OpenAPI (no cambian el comportamiento). Cada ruta declara
 # solo los códigos que su código puede producir; todas usan el formato uniforme ErrorRespuesta.
@@ -139,6 +142,53 @@ def explicar_prediccion(prediction_id: int):
     verificada. 409 si no es del GBM (p. ej., línea base), si el modelo o el artefacto no coinciden o si
     los datos no permiten reproducir la ejecución; nunca devuelve una explicación parcial."""
     return servicios.explicar_prediccion(prediction_id)
+
+
+# ------------------------------------------------------------------ M1. predicción contra real
+
+def _validar_filtros_precision(idruta, horizonte_min):
+    if idruta is not None and idruta not in (2, 16, 21):
+        raise SolicitudInvalida("idruta debe ser 2, 16 o 21")
+    if horizonte_min is not None and horizonte_min not in (30, 60, 120):
+        raise SolicitudInvalida("horizonte_min debe ser 30, 60 o 120")
+
+
+@v1.get("/predictions/accuracy", tags=["predicciones"])
+def precision_predicciones(model_id: int | None = None, execution_id: uuid.UUID | None = None,
+                           idruta: int | None = None, horizonte_min: int | None = None,
+                           desde: datetime | None = None, hasta: datetime | None = None,
+                           agrupar_por: list[str] = AgruparPor):
+    """Métricas predicción-real (MAE, RMSE, WAPE, sMAPE, sesgo, cobertura del intervalo y MAE
+    relativo al ingenuo de 7 días) por modelo. Solo usa reales consolidados y medibles; el resto se
+    cuenta por estado. desde/hasta filtran franja_inicio [desde, hasta)."""
+    _validar_filtros_precision(idruta, horizonte_min)
+    invalidas = [g for g in agrupar_por if g not in evaluacion_real.cr.AGRUPACIONES]
+    if invalidas:
+        raise SolicitudInvalida(f"agrupar_por no soportado: {invalidas}",
+                                {"permitidos": list(evaluacion_real.cr.AGRUPACIONES)})
+    with consultar_resultados() as c:
+        r = evaluacion_real.evaluar(c, model_id, None if execution_id is None else str(execution_id),
+                                    idruta, horizonte_min, desde, hasta)
+    return evaluacion_real.resumen_metricas(r, tuple(dict.fromkeys(agrupar_por)))
+
+
+@v1.get("/predictions/accuracy/pairs", tags=["predicciones"])
+def pares_prediccion_real(model_id: int | None = None, execution_id: uuid.UUID | None = None,
+                          idruta: int | None = None, horizonte_min: int | None = None,
+                          desde: datetime | None = None, hasta: datetime | None = None,
+                          estado: str | None = None, pagina_n: int = Pagina,
+                          tamano: int = Tamano):
+    """Cada predicción con su real, estado y motivo de exclusión (paginado)."""
+    _validar_filtros_precision(idruta, horizonte_min)
+    if estado is not None and estado not in evaluacion_real.cr.ESTADOS:
+        raise SolicitudInvalida(f"estado no válido: {estado}",
+                                {"permitidos": list(evaluacion_real.cr.ESTADOS)})
+    with consultar_resultados() as c:
+        r = evaluacion_real.evaluar(c, model_id, None if execution_id is None else str(execution_id),
+                                    idruta, horizonte_min, desde, hasta)
+    filas, total = evaluacion_real.pares_json(r["pares"], estado, pagina_n, tamano)
+    return {**pagina(filas, total, pagina_n, tamano), "parametros": r["parametros"],
+            "huella": r["huella"]}
 
 
 # ------------------------------------------------------------------ 5-6. recomendaciones
@@ -211,6 +261,30 @@ def activar_modelo(model_id: int, s: ActivacionModelo):
     if r is None:
         raise NoEncontrado("Modelo", model_id)
     return r
+
+
+# ------------------------------------------------------------------ 11. calidad de datos (G3)
+
+@v1.get("/quality/errors", tags=["calidad"], response_model=PaginaErroresCalidad,
+        responses=errores(422, 500))
+def listar_errores_calidad(lote: str = Query(..., min_length=1, max_length=120),
+                           alcance: Literal["auto", "ejecucion", "ventana"] = "auto",
+                           idruta: int | None = None,
+                           regla: str | None = Query(None, min_length=1, max_length=100),
+                           tabla_origen: str | None = Query(None, min_length=1, max_length=100),
+                           reglas_version: str | None = Query(None, min_length=1, max_length=50),
+                           causa: str | None = Query(None, min_length=1),
+                           pagina_n: int = Pagina, tamano: int = Tamano):
+    """Errores de calidad de un lote, con el evento deduplicado al que pertenece cada detección.
+
+    alcance: 'ventana' = lote exacto; 'ejecucion' = sus ventanas <lote>_NNN; 'auto' = ambos.
+    """
+    with consultar_resultados() as c:
+        filas, total = repo.errores_calidad_por_lote(
+            c, lote, alcance, {"idruta": idruta, "regla": regla, "tabla_origen": tabla_origen,
+                               "reglas_version": reglas_version, "causa": causa},
+            pagina_n, tamano)
+    return pagina(filas, total, pagina_n, tamano)
 
 
 app.include_router(v1)

@@ -7,7 +7,7 @@ la tabla anterior. El downgrade vuelve a una fila por detección (los ids de ant
 recuperan; las detecciones posteriores reciben ids nuevos) y se niega si la forma antigua no
 puede representar los datos.
 
-No es la migración de sentido IDA/VUELTA y segmentos B1-B5 (no autorizada; si se autoriza, 0008).
+No es la migración de sentido IDA/VUELTA y segmentos B1-B5 (no autorizada; si se autoriza, 0009: la 0008 es la de trazabilidad de predicciones).
 
 Revision ID: 0007
 Revises: 0006
