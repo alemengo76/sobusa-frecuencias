@@ -73,7 +73,84 @@ with pestanas[2]:
             asignado = st.text_input("Asignar a (si aplica)")
             comentario = st.text_area("Comentario")
             if st.form_submit_button("Guardar"):
-                r = requests.patch(f"{API}/alerts/{aid}/status", json={
-                    "estado": nuevo, "usuario": usuario, "comentario": comentario or None,
-                    "usuario_asignado": asignado or None}, timeout=10)
-                st.write(r.json())
+                try:
+                    r = requests.patch(
+                        f"{API}/alerts/{aid}/status",
+                        json={
+                            "estado": nuevo,
+                            "usuario": usuario,
+                            "comentario": comentario or None,
+                            "usuario_asignado": asignado or None,
+                        },
+                        timeout=10,
+                    )
+                    r.raise_for_status()
+                    resultado = r.json()
+
+                except requests.Timeout:
+                    st.error(
+                        "No se pudo confirmar la actualización. "
+                        "Revise el estado de la alerta antes de reintentar."
+                    )
+
+                except requests.ConnectionError:
+                    st.error(
+                        "No se pudo confirmar la actualización. "
+                        "Revise el estado de la alerta antes de reintentar."
+                    )
+
+                except requests.HTTPError as e:
+                    respuesta = e.response
+                    codigo = respuesta.status_code if respuesta is not None else "desconocido"
+
+                    mensajes = {
+                        404: "La alerta solicitada no existe.",
+                        409: "La operación no está permitida por el estado actual de la alerta.",
+                        422: "Los datos enviados no cumplen las validaciones.",
+                        500: "La API encontró un error interno.",
+                    }
+
+                    texto_error = (
+                        f"No se pudo actualizar la alerta (HTTP {codigo}). "
+                        f"{mensajes.get(codigo, 'La API rechazó la solicitud.')}"
+                    )
+
+                    cuerpo_error = {}
+                    if respuesta is not None:
+                        try:
+                            cuerpo_error = respuesta.json()
+                        except requests.exceptions.JSONDecodeError:
+                            pass
+
+                    error_api = (
+                        cuerpo_error.get("error", {})
+                        if isinstance(cuerpo_error, dict)
+                        else {}
+                    )
+                    if isinstance(error_api, dict):
+                        mensaje_api = error_api.get("mensaje")
+                        correlation_id = error_api.get("correlation_id")
+
+                        if mensaje_api:
+                            texto_error += f" Mensaje de la API: {mensaje_api}"
+                        if correlation_id:
+                            texto_error += f" Identificador de seguimiento: {correlation_id}"
+
+                    st.error(texto_error)
+
+                except requests.exceptions.JSONDecodeError:
+                    st.error(
+                        f"La API respondió con HTTP {r.status_code}, pero no se pudo leer su respuesta. "
+                        "La actualización pudo haberse aplicado. "
+                        "Revise el estado de la alerta antes de reintentar."
+                    )
+
+                except requests.RequestException:
+                    st.error("Ocurrió un problema de comunicación con la API.")
+
+                except ValueError:
+                    st.error("Ocurrió un error al procesar la respuesta de la API.")
+
+                else:
+                    st.success("La alerta se actualizó correctamente.")
+                    st.json(resultado)
