@@ -51,13 +51,121 @@ def test_alt_005_y_007():
     assert [a["codigo"] for a in motor.alt_005_007(obs, U)] == ["ALT-005", "ALT-007"]
 
 
-def test_alt_006_retraso_y_salida_no_realizada():
-    s = pd.DataFrame({"idruta": 2, "idprogramacion": [1, 2, 3],
-                      "fechasalida": pd.to_datetime(["2025-03-04 06:00"] * 3),
-                      "fechainicio": pd.to_datetime(["2025-03-04 06:20", "2025-03-04 06:02", None]),
-                      "cancelada": ["N", "N", "S"]})
-    a = motor.alt_006(s, U)
-    assert len(a) == 2 and all(x["severidad"] == "alta" for x in a)
+# ---------------------------------------------------------------- ALT-006 (contrato alt006-v2)
+
+M = pd.Timestamp("2025-12-20 12:00")            # marca de agua de prueba; consolidado: salida < 12-17 12:00
+
+
+def _sal(filas):
+    """filas: (idprogramacion, idruta, salida, inicio, cancelada, finalizado)"""
+    return pd.DataFrame(filas, columns=["idprogramacion", "idruta", "fechasalida", "fechainicio", "cancelada",
+                                        "finalizado"]).assign(
+        fechasalida=lambda d: pd.to_datetime(d.fechasalida), fechainicio=lambda d: pd.to_datetime(d.fechainicio))
+
+
+def _clase(fila):
+    return motor.clasificar_salidas(_sal([fila]), U["ALT-006"], M, 3).clase.iloc[0]
+
+
+@pytest.mark.parametrize("inicio, clase", [
+    ("2025-12-10 06:20", "tardia"),
+    ("2025-12-10 06:10", "a_tiempo"),                 # exactamente 10 min: dentro de tolerancia
+    ("2025-12-10 06:10:01", "tardia"),
+    ("2025-12-10 05:55", "a_tiempo"),                 # negativo dentro del rango: no es error
+    ("2025-12-10 08:00", "tardia"),                   # 120 min: todavía tardía
+    ("2025-12-10 08:01", "desfase_extremo"),
+    ("2025-12-10 03:59", "desfase_extremo"),          # -121 min
+    (None, "ausente"),                                # día consolidado sin inicio registrado
+])
+def test_alt_006_clases_por_desfase(inicio, clase):
+    assert _clase((1, 2, "2025-12-10 06:00", inicio, "N", "S")) == clase
+
+
+def test_alt_006_tolerancia_no_vencida_no_se_evalua_con_o_sin_inicio():
+    assert _clase((1, 2, "2025-12-20 11:55", "2025-12-20 11:58", "N", "N")) == "no_evaluable"
+    assert _clase((1, 2, "2025-12-20 11:55", None, "N", "N")) == "no_evaluable"
+    assert _clase((1, 2, "2025-12-20 11:50", "2025-12-20 11:59", "N", "N")) == "a_tiempo"   # justo vencida
+
+
+def test_alt_006_sin_inicio_no_consolidado_no_es_ausente():
+    assert _clase((1, 2, "2025-12-18 08:00", None, "N", "N")) == "no_evaluable"     # dentro de los 3 días
+    assert _clase((1, 2, "2025-12-17 11:59", None, "N", "N")) == "ausente"
+    assert _clase((1, 2, "2025-12-17 12:00", None, "N", "N")) == "no_evaluable"     # borde del corte
+
+
+def test_alt_006_finalizado_no_condiciona_la_evaluacion():
+    for fin in ("S", "N", None, "X"):
+        assert _clase((1, 2, "2025-12-10 06:00", "2025-12-10 06:25", "N", fin)) == "tardia"
+        assert _clase((1, 2, "2025-12-10 06:00", None, "N", fin)) == "ausente"
+
+
+def test_alt_006_canceladas_excluidas_aunque_tengan_inicio():
+    assert _clase((1, 2, "2025-12-10 06:00", None, "S", "N")) == "cancelada"
+    assert _clase((1, 2, "2025-12-10 06:00", "2025-12-10 06:40", "S", "N")) == "cancelada"
+    assert motor.alt_006(_sal([(1, 2, "2025-12-10 06:00", None, "S", "N")]), U, M, 3) == []
+
+
+def test_alt_006_estado_invalido_futura_y_fuera_de_alcance():
+    assert _clase((1, 2, "2025-12-10 06:00", None, None, "S")) == "estado_invalido"
+    assert _clase((1, 2, "2025-12-10 06:00", None, "X", "S")) == "estado_invalido"
+    assert _clase((1, 2, "2025-12-20 12:30", None, "N", "N")) == "futura"
+    assert motor.clasificar_salidas(_sal([(1, 7, "2025-12-10 06:00", None, "N", "S")]), 10, M, 3).empty
+
+
+def test_alt_006_duplicados_se_excluyen_todos_y_se_diagnostican():
+    s = _sal([(5, 2, "2025-12-10 06:00", "2025-12-10 06:30", "N", "S"),
+              (5, 2, "2025-12-10 06:00", "2025-12-10 06:02", "N", "S"),
+              (6, 2, "2025-12-10 06:05", "2025-12-10 06:06", "N", "S")])
+    c = motor.clasificar_salidas(s, 10, M, 3)
+    assert list(c.clase) == ["duplicada", "duplicada", "a_tiempo"]
+    assert motor.alt_006(s, U, M, 3) == []                         # ninguna aparición del 5 cuenta
+    d = motor.diagnostico_alt_006(s, U, M, 3)
+    assert len(d["duplicada"]) == 2 and d["conteo_por_clase"]["duplicada"] == 2
+
+
+def test_alt_006_una_alerta_por_franja_con_evidencia():
+    s = _sal([(11, 2, "2025-12-10 06:00", "2025-12-10 06:20", "N", "S"),     # tardía +20
+              (12, 2, "2025-12-10 06:05", None, "N", "N"),                    # sin inicio registrado
+              (13, 2, "2025-12-10 06:10", "2025-12-10 06:12", "N", "S"),     # a tiempo
+              (14, 2, "2025-12-10 06:14", None, "S", "N"),                    # cancelada
+              (15, 2, "2025-12-10 06:30", "2025-12-10 06:50", "N", "S"),     # otra franja
+              (16, 16, "2025-12-10 06:00", "2025-12-10 06:30", "N", "S")])   # otra ruta
+    a = motor.alt_006(s, U, M, 3)
+    assert len(a) == 3 and len({x["clave_dedup"] for x in a}) == 3
+    x = [x for x in a if x["idruta"] == 2 and x["franja_inicio"] == pd.Timestamp("2025-12-10 06:00")][0]
+    assert x["severidad"] == "alta" and x["valor_observado"] == 20.0 and x["valor_esperado"] == 0
+    assert x["umbral"] == 10.0 and x["puntuacion_anomalia"] == round(2 / 3, 3)
+    e = x["explicacion"]
+    assert "3 programaciones evaluadas" in e and "1 sin inicio registrado (12)" in e and "11 +20 min" in e
+    assert "1 canceladas no evaluadas" in e and "alt006-v2" in e and "no prueba que el bus" in e
+    assert "no se realizó" not in e
+    assert x["clave_dedup"] == motor.clave_dedup("ALT-006", 2, pd.Timestamp("2025-12-10 06:00"), None)
+
+
+def test_alt_006_solo_ausencias_sin_valor_observado():
+    a = motor.alt_006(_sal([(21, 21, "2025-12-10 06:00", None, "N", "N")]), U, M, 3)
+    assert len(a) == 1 and a[0]["valor_observado"] is None and a[0]["puntuacion_anomalia"] == 1.0
+
+
+def test_alt_006_extremos_solo_en_diagnostico():
+    s = _sal([(31, 2, "2025-12-10 06:00", "2025-12-10 09:00", "N", "S"),
+              (32, 2, "2025-12-10 06:00", "2025-12-10 03:00", "N", "S")])
+    assert motor.alt_006(s, U, M, 3) == []
+    d = motor.diagnostico_alt_006(s, U, M, 3)
+    assert [r["idprogramacion"] for r in d["desfase_extremo"]] == [31, 32]
+    assert {r["desfase_min"] for r in d["desfase_extremo"]} == {180.0, -180.0}
+
+
+def test_alt_006_umbral_viene_de_u_y_no_usa_el_reloj():
+    s = _sal([(41, 2, "2025-12-10 06:00", "2025-12-10 06:12", "N", "S")])
+    assert len(motor.alt_006(s, U, M, 3)) == 1
+    assert motor.alt_006(s, {**U, "ALT-006": 15.0}, M, 3) == []
+    assert motor.alt_006(s, U, M, 3) == motor.alt_006(s, U, M, 3)          # determinista
+
+
+def test_alt_006_entrada_vacia():
+    s = _sal([])
+    assert motor.alt_006(s, U, M, 3) == [] and motor.diagnostico_alt_006(s, U, M, 3)["conteo_por_clase"] == {}
 
 
 def test_alt_008_consolidado_anomalo():
