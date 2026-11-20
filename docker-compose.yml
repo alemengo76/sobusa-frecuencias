@@ -19,6 +19,7 @@ services:
       retries: 20
 
   app:
+    platform: linux/amd64
     build:
       context: .
       # PIP_MODO=wheelhouse instala sin red desde WHEELHOUSE_DIR (docs/WHEELHOUSE.md). Sin variables,
