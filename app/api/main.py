@@ -8,8 +8,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app import evaluacion_real, servicios
-from app.api.esquemas import (ActivacionModelo, CambioEstadoAlerta, SolicitudFrecuencias,
-                              SolicitudPrediccion, SolicitudRecomendacion)
+from app.api.esquemas import (ActivacionModelo, CambioEstadoAlerta, ErrorRespuesta,
+                              SolicitudFrecuencias, SolicitudPrediccion, SolicitudRecomendacion)
 from app.core.config import obtener_config
 from app.core.errores import ErrorAPI, NoEncontrado, SolicitudInvalida, cuerpo_error
 from app.core.registro import configurar_logs, correlation_id
@@ -72,6 +72,19 @@ Pagina = Query(1, ge=1, alias="pagina")
 Tamano = Query(50, ge=1, le=500)
 AgruparPor = Query(["idruta", "horizonte_min"])
 
+# Respuestas de error documentadas en OpenAPI (no cambian el comportamiento). Cada ruta declara
+# solo los códigos que su código puede producir; todas usan el formato uniforme ErrorRespuesta.
+DESCRIPCION_ERRORES = {
+    404: "Recurso no encontrado",
+    409: "Conflicto con el estado actual",
+    422: "Solicitud inválida: no cumple el esquema o una regla de validación",
+    500: "Error interno no controlado (por ejemplo, un fallo de acceso a la base de datos)",
+}
+
+
+def errores(*codigos: int) -> dict:
+    return {c: {"model": ErrorRespuesta, "description": DESCRIPCION_ERRORES[c]} for c in codigos}
+
 
 @app.get("/salud", tags=["sistema"])
 def salud():
@@ -80,14 +93,16 @@ def salud():
 
 # ------------------------------------------------------------------ 1-2. frecuencias
 
-@v1.post("/frequency/executions", status_code=201, tags=["frecuencias"])
+@v1.post("/frequency/executions", status_code=201, tags=["frecuencias"],
+         responses=errores(409, 422, 500))
 def crear_ejecucion_frecuencias(s: SolicitudFrecuencias):
     """Predicción + recomendación + alertas en una sola ejecución trazable."""
     return servicios.ejecutar_frecuencias(s.idrutas, _dia(s.dia), s.horizontes, s.base_demanda,
                                           correlation_id.get())
 
 
-@v1.get("/frequency/executions/{execution_id}", tags=["frecuencias"])
+@v1.get("/frequency/executions/{execution_id}", tags=["frecuencias"],
+        responses=errores(404, 422, 500))
 def obtener_ejecucion(execution_id: uuid.UUID):
     with consultar_resultados() as c:
         e = repo.obtener_ejecucion(c, str(execution_id))
@@ -98,13 +113,15 @@ def obtener_ejecucion(execution_id: uuid.UUID):
 
 # ------------------------------------------------------------------ 3-4. predicciones
 
-@v1.post("/predictions/run", status_code=201, tags=["predicciones"])
+@v1.post("/predictions/run", status_code=201, tags=["predicciones"],
+         responses=errores(409, 422, 500))
 def correr_predicciones(s: SolicitudPrediccion):
     r = servicios.ejecutar_predicciones(s.idrutas, _dia(s.dia), s.horizontes, correlation_id.get())
     return {k: v for k, v in r.items() if not k.startswith("_")}
 
 
-@v1.get("/predictions", tags=["predicciones"])
+@v1.get("/predictions", tags=["predicciones"],
+        responses=errores(422, 500))
 def listar_predicciones(idruta: int | None = None, horizonte_min: int | None = None,
                         execution_id: str | None = None, desde: datetime | None = None,
                         hasta: datetime | None = None, pagina_n: int = Pagina,
@@ -165,7 +182,8 @@ def pares_prediccion_real(model_id: int | None = None, execution_id: uuid.UUID |
 
 # ------------------------------------------------------------------ 5-6. recomendaciones
 
-@v1.post("/recommendations/calculate", status_code=201, tags=["recomendaciones"])
+@v1.post("/recommendations/calculate", status_code=201, tags=["recomendaciones"],
+         responses=errores(404, 422, 500))
 def calcular_recomendaciones(s: SolicitudRecomendacion):
     with escribir() as c:
         pred = servicios.predicciones_de_ejecucion(c, s.execution_id_prediccion)
@@ -176,7 +194,8 @@ def calcular_recomendaciones(s: SolicitudRecomendacion):
     return {"execution_id": eid, **resumen}
 
 
-@v1.get("/recommendations", tags=["recomendaciones"])
+@v1.get("/recommendations", tags=["recomendaciones"],
+        responses=errores(422, 500))
 def listar_recomendaciones(idruta: int | None = None, horizonte_min: int | None = None,
                            es_viable: bool | None = None, execution_id: str | None = None,
                            desde: datetime | None = None, hasta: datetime | None = None,
@@ -191,7 +210,8 @@ def listar_recomendaciones(idruta: int | None = None, horizonte_min: int | None 
 
 # ------------------------------------------------------------------ 7-8. alertas
 
-@v1.get("/alerts", tags=["alertas"])
+@v1.get("/alerts", tags=["alertas"],
+        responses=errores(422, 500))
 def listar_alertas(idruta: int | None = None, estado: str | None = None,
                    severidad: str | None = None, codigo: str | None = None,
                    desde: datetime | None = None, hasta: datetime | None = None,
@@ -203,7 +223,8 @@ def listar_alertas(idruta: int | None = None, estado: str | None = None,
     return pagina(filas, total, pagina_n, tamano)
 
 
-@v1.patch("/alerts/{alert_id}/status", tags=["alertas"])
+@v1.patch("/alerts/{alert_id}/status", tags=["alertas"],
+          responses=errores(404, 409, 422, 500))
 def cambiar_estado_alerta(alert_id: int, s: CambioEstadoAlerta):
     """Reconocer, asignar, comentar (mismo estado + comentario), cerrar o descartar."""
     return servicios.cambiar_estado_alerta(alert_id, s.estado, s.usuario, s.comentario,
@@ -212,13 +233,15 @@ def cambiar_estado_alerta(alert_id: int, s: CambioEstadoAlerta):
 
 # ------------------------------------------------------------------ 9-10. modelos
 
-@v1.get("/models", tags=["modelos"])
+@v1.get("/models", tags=["modelos"],
+        responses=errores(500))
 def listar_modelos():
     with consultar_resultados() as c:
         return {"datos": repo.listar_modelos(c)}
 
 
-@v1.post("/models/{model_id}/activate", tags=["modelos"])
+@v1.post("/models/{model_id}/activate", tags=["modelos"],
+         responses=errores(404, 409, 422, 500))
 def activar_modelo(model_id: int, s: ActivacionModelo):
     """Activa un modelo y retira el anterior. Para revertir, active de nuevo el anterior."""
     with escribir() as c:
