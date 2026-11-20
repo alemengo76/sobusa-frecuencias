@@ -36,6 +36,52 @@ class ActivacionModelo(BaseModel):
     motivo: str = Field(min_length=3, max_length=500)
 
 
+# ------------------------------------------------------------------ explicación de una predicción (RF-015)
+
+
+class AporteVariable(BaseModel):
+    variable: str
+    valor: float | int | str | None = Field(description="Valor de la variable de FE 3.1 (null si falta)")
+    valor_modelo: float | None = Field(description="Valor que recibe el modelo (código fijo en categóricas; "
+                                                   "null si falta o la categoría es desconocida)")
+    aporte_log: float = Field(description="Aporte TreeSHAP en escala log (pérdida Poisson)")
+    factor: float = Field(description="exp(aporte_log): factor que multiplica la predicción")
+
+
+class ImportanciaArtefacto(BaseModel):
+    metodo: str
+    model_version: str
+    nota: str
+    variables: list[dict] = Field(description="variable, ganancia, proporcion, divisiones")
+
+
+class ExplicacionPrediccion(BaseModel):
+    """Explicación individual TreeSHAP, RECONSTRUIDA Y VERIFICADA (no garantizada: ver advertencia)."""
+    prediction_id: int
+    execution_id: str
+    model_id: int
+    model_version: str
+    feature_version: str
+    artefacto_sha256: str
+    scikit_learn: str
+    idruta: int
+    franja_inicio: datetime
+    horizonte_min: int
+    data_cutoff: datetime
+    demanda_pred: float
+    estado: Literal["reconstruida_y_verificada"]
+    advertencia: str
+    metodo: str
+    escala: str
+    referencia_log: float
+    referencia_pasajeros: float
+    prediccion_log: float
+    prediccion_pasajeros: float
+    aportes: list[AporteVariable]
+    verificaciones: dict
+    importancia_global_artefacto: ImportanciaArtefacto
+
+
 # ------------------------------------------------------------------ errores (solo documentación OpenAPI)
 # Reflejan app/core/errores.py: cuerpo_error() siempre escribe las cuatro claves.
 

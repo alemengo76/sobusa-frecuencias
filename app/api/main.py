@@ -9,7 +9,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app import evaluacion_real, servicios
-from app.api.esquemas import (ActivacionModelo, CambioEstadoAlerta, ErrorRespuesta,
+from app.api.esquemas import (ActivacionModelo, CambioEstadoAlerta, ErrorRespuesta, ExplicacionPrediccion,
                               PaginaErroresCalidad, SolicitudFrecuencias, SolicitudPrediccion,
                               SolicitudRecomendacion)
 from app.core.config import obtener_config
@@ -133,6 +133,15 @@ def listar_predicciones(idruta: int | None = None, horizonte_min: int | None = N
                                                         "execution_id": execution_id},
                                       desde, hasta, pagina_n, tamano)
     return pagina(filas, total, pagina_n, tamano)
+
+
+@v1.get("/predictions/{prediction_id}/explanation", tags=["predicciones"],
+        response_model=ExplicacionPrediccion, responses=errores(404, 409, 422, 500))
+def explicar_prediccion(prediction_id: int):
+    """RF-015: aportes TreeSHAP de las variables a una predicción del GBM FE 3.1, reconstruida y
+    verificada. 409 si no es del GBM (p. ej., línea base), si el modelo o el artefacto no coinciden o si
+    los datos no permiten reproducir la ejecución; nunca devuelve una explicación parcial."""
+    return servicios.explicar_prediccion(prediction_id)
 
 
 # ------------------------------------------------------------------ M1. predicción contra real

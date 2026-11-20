@@ -384,3 +384,141 @@ def ejecutar_frecuencias(idrutas, dia: datetime, horizontes, base_demanda: str,
         _registrar_fallo("frecuencias", parametros, correlation_id, e)
         raise
     return {"execution_id": eid, "estado": "exitosa", **resumen}
+
+
+# ------------------------------------------------------------------ explicación de una predicción (RF-015, A1)
+
+def explicar_prediccion(prediction_id: int) -> dict:
+    """RF-015 (A1): explicación TreeSHAP de una predicción del GBM, RECONSTRUIDA Y VERIFICADA.
+
+    Nunca devuelve una explicación parcial. Rechaza con:
+    - 404: la predicción no existe.
+    - 409: no es del GBM FE 3.1 (p. ej., respaldo de línea base); el modelo o el artefacto no
+      coinciden (hash SHA-256 completo, model_id, model_version, feature_version, formato o versión
+      exacta de scikit-learn) o su estructura interna no es la esperada; algún viaje del período se
+      cargó después del inicio de la ejecución; o las predicciones de la ejecución y la ruta
+      (valores, límites y franjas) no se reproducen a la precisión de la base.
+    - 500 (error interno): la identidad referencia + suma(aportes) = predicción raw no se cumple.
+    """
+    import sklearn
+
+    from app.db.conexion import consultar_resultados
+    from app.ml import explicacion_gbm as XG
+
+    # 1. Lecturas (solo lectura); el cálculo se hace después, fuera de la conexión
+    with consultar_resultados() as c:
+        p = repo.obtener_prediccion(c, prediction_id)
+        if p is None:
+            raise NoEncontrado("Predicción", prediction_id)
+        modelo = repo.obtener_modelo(c, int(p["model_id"]))
+        if modelo is None:
+            raise Conflicto(f"El modelo {p['model_id']} de la predicción {prediction_id} no está registrado")
+        metodo = (modelo.get("hiperparametros") or {}).get("metodo")
+        if metodo != modelo_gbm.METODO:
+            raise Conflicto(f"La predicción {prediction_id} es del modelo {modelo.get('version')} "
+                            f"({metodo or modelo.get('tipo')}): TreeSHAP solo explica el GBM FE 3.1 y las "
+                            "predicciones de línea base no se explican con este método")
+        eid, idruta = str(p["execution_id"]), int(p["idruta"])
+        ejecucion = repo.obtener_ejecucion(c, eid)
+        filas = repo.predicciones_ejecucion_ruta(c, eid, idruta)
+        dia = XG.instante_local(p["data_cutoff"])
+        desde, hasta = XG.ventana_viajes(dia)
+        ultima_carga = repo.ultima_carga_viajes(c, idruta, desde.to_pydatetime(), hasta.to_pydatetime())
+        viajes = repo.viajes_fuente(c, [idruta], desde.to_pydatetime(), hasta.to_pydatetime())
+
+    # 2. Identidad del modelo y del artefacto
+    if p["model_version"] != modelo.get("version"):
+        raise Conflicto(f"model_version de la predicción ({p['model_version']}) distinta de la del registro "
+                        f"({modelo.get('version')})")
+    sha = (modelo.get("artefacto_sha256") or "").strip()
+    if len(sha) != 64 or not modelo.get("artefacto_ruta"):
+        raise Conflicto(f"El modelo {p['model_id']} no tiene artefacto o hash SHA-256 registrado")
+    try:
+        art = modelo_gbm.cargar(modelo_gbm.ruta_artefacto(modelo["artefacto_ruta"], obtener_config().modelos_dir),
+                                sha)       # hash completo, formato, scikit-learn exacto y FE 3.1 / comun-1.5
+    except modelo_gbm.ModeloNoDisponible as e:
+        raise Conflicto(f"No se puede usar el artefacto del modelo {p['model_id']}: {e}") from e
+    meta = art.meta
+    for campo, esperado, obtenido in (
+            ("version del artefacto", modelo.get("version"), meta.get("version")),
+            ("formato", modelo_gbm.FORMATO, meta.get("formato")),
+            ("scikit-learn", sklearn.__version__, meta.get("sklearn")),
+            ("feature_version del artefacto", FEATURE_VERSION_GBM, meta.get("feature_version")),
+            ("feature_version de la predicción", FEATURE_VERSION_GBM, p["feature_version"])):
+        if esperado != obtenido:
+            raise Conflicto(f"{campo}: se esperaba {esperado!r} y se obtuvo {obtenido!r}")
+    try:
+        XG.validar_estructura(art.modelo)
+    except XG.ExplicacionNoValida as e:
+        raise Conflicto(f"Estructura interna del artefacto no compatible con TreeSHAP: {e}") from e
+
+    # 3. Coherencia de la ejecución y procedencia de los viajes
+    if dia != dia.normalize():
+        raise Conflicto(f"data_cutoff {p['data_cutoff']} no es el inicio de un día")
+    if ejecucion is None:
+        raise Conflicto(f"La ejecución {eid} de la predicción no está registrada")
+    if ejecucion.get("tipo") != "prediccion" or ejecucion.get("estado") != "exitosa":
+        raise Conflicto(f"La ejecución {eid} no es una ejecución de predicción exitosa "
+                        f"(tipo {ejecucion.get('tipo')!r}, estado {ejecucion.get('estado')!r})")
+    if not filas or any(int(f["model_id"]) != int(p["model_id"]) or f["model_version"] != p["model_version"]
+                        or XG.instante_local(f["data_cutoff"]) != dia for f in filas):
+        raise Conflicto(f"La ejecución {eid} no tiene un único modelo y corte de datos para la ruta {idruta}")
+    if ultima_carga is None:
+        raise Conflicto(f"No hay viajes de la ruta {idruta} entre {desde:%Y-%m-%d} y {hasta:%Y-%m-%d}")
+    if pd.Timestamp(ultima_carga) > pd.Timestamp(ejecucion["iniciada_en"]):
+        raise Conflicto(f"Viajes de la ruta {idruta} del período se cargaron de nuevo ({ultima_carga}) "
+                        f"después del inicio de la ejecución ({ejecucion['iniciada_en']}): no se reconstruye")
+
+    # 4. Reproducción histórica de TODAS las predicciones de la ejecución y la ruta
+    P = a_formato_fe(viajes)
+    horizontes = sorted({int(f["horizonte_min"]) for f in filas})
+    try:
+        recalculadas = modelo_gbm.predecir_dia(art, P, dia, [idruta], horizontes)
+        X = modelo_gbm.variables_dia(P, dia, art.horario)
+    except modelo_gbm.ModeloNoDisponible as e:
+        raise Conflicto(f"No se pudieron recalcular las predicciones: {e}") from e
+    try:
+        comparadas = XG.verificar_reproduccion(filas, recalculadas)
+    except XG.ReproduccionDistinta as e:
+        raise Conflicto(f"Reproducción rechazada: {e}") from e
+
+    # 5. La fila pedida: sus variables, su predicción y su explicación
+    franja, horizonte = XG.instante_local(p["franja_inicio"]), int(p["horizonte_min"])
+    fila = X[X.id_ruta.astype(str).eq(str(idruta)) & X.horizonte_min.astype(int).eq(horizonte)
+             & pd.to_datetime(X.origen).eq(franja)]
+    propia = recalculadas[pd.to_datetime(recalculadas.franja_inicio).eq(franja)
+                          & recalculadas.horizonte_min.astype(int).eq(horizonte)]
+    if len(fila) != 1 or len(propia) != 1:
+        raise Conflicto(f"No se encontró una única fila de variables para la predicción {prediction_id}")
+    if XG.a_precision_bd(propia.demanda_pred.iloc[0]) != XG.a_precision_bd(p["demanda_pred"]):
+        raise Conflicto(f"La predicción {prediction_id} recalculada no coincide con la guardada")
+    explicacion = XG.explicar(art, fila)[0]                 # ExplicacionNoValida -> error interno (500)
+    if XG.a_precision_bd(max(explicacion["prediccion_pasajeros"], 0.0)) != XG.a_precision_bd(p["demanda_pred"]):
+        raise XG.ExplicacionNoValida("exp(raw) no reproduce la predicción guardada")
+
+    importancia = XG.importancia_ganancia(art.modelo)
+    return {
+        "prediction_id": int(p["prediction_id"]), "execution_id": eid, "model_id": int(p["model_id"]),
+        "model_version": p["model_version"], "feature_version": p["feature_version"],
+        "artefacto_sha256": sha, "scikit_learn": sklearn.__version__,
+        "idruta": idruta, "franja_inicio": p["franja_inicio"], "horizonte_min": horizonte,
+        "data_cutoff": p["data_cutoff"], "demanda_pred": float(p["demanda_pred"]),
+        "estado": XG.ESTADO, "advertencia": XG.ADVERTENCIA,
+        "metodo": XG.METODO, "escala": "log: prediccion = exp(referencia_log + suma de aporte_log); "
+                                       "factor = exp(aporte_log) multiplica la predicción",
+        **{k: explicacion[k] for k in ("referencia_log", "referencia_pasajeros", "prediccion_log",
+                                        "prediccion_pasajeros", "aportes")},
+        "verificaciones": {
+            "procedencia": {"ultima_carga_viajes": ultima_carga, "inicio_ejecucion": ejecucion["iniciada_en"],
+                            "ventana": [desde.to_pydatetime(), hasta.to_pydatetime()]},
+            "reproduccion": {"predicciones_comparadas": comparadas, "horizontes": horizontes},
+            "identidad_treeshap": {"error_absoluto": explicacion["error_identidad"],
+                                   "tolerancia": XG.TOLERANCIA},
+        },
+        "importancia_global_artefacto": {
+            "metodo": XG.METODO_IMPORTANCIA, "model_version": meta.get("version"),
+            "nota": "Global y del artefacto de producción: proporción de la ganancia de entrenamiento en las "
+                    "divisiones de cada variable. No es la importancia por permutación de "
+                    "metricas.importancia_top10 (modelo de evaluación) ni una explicación individual.",
+            "variables": importancia.to_dict("records")},
+    }
