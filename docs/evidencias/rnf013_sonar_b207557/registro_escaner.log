@@ -1,0 +1,109 @@
+10:53:32.817 INFO  Scanner configuration file: ~/herramientas/sonar/sonar-scanner-8.3.1.16491-macosx-aarch64/conf/sonar-scanner.properties
+10:53:32.819 INFO  Project root configuration file: NONE
+10:53:32.827 INFO  SonarScanner CLI 8.3.1.16491
+10:53:32.829 INFO  Mac OS X 27.0.1 aarch64
+10:53:35.078 INFO  Communicating with SonarQube Community Build 26.11.0.134175
+10:53:35.078 INFO  JRE provisioning: os[macos], arch[arm64]
+10:53:35.427 INFO  Starting SonarScanner Engine...
+10:53:35.427 INFO  Java 21.0.13 Eclipse Adoptium (64-bit)
+10:53:37.547 INFO  Load global settings
+10:53:37.637 INFO  Load global settings (done) | time=90ms
+10:53:37.638 INFO  Server id: 147B411E-AaHahfJGvXs5Qzt37ai4
+10:53:37.782 INFO  Loading required plugins
+10:53:37.782 INFO  Load plugins index
+10:53:37.800 INFO  Load plugins index (done) | time=16ms
+10:53:37.800 INFO  Load/download plugins
+10:53:37.805 INFO  Load/download plugins (done) | time=5ms
+10:53:37.941 INFO  Load project settings for component key: 'sobusa-frecuencias'
+10:53:37.967 INFO  Load project settings for component key: 'sobusa-frecuencias' (done) | time=25ms
+10:53:37.972 INFO  Process project properties
+10:53:37.982 INFO  Process project properties (done) | time=9ms
+10:53:37.988 INFO  Project key: sobusa-frecuencias
+10:53:37.988 INFO  Base dir: ~/Documents/GitHub/sobusa-frecuencias
+10:53:37.988 INFO  Working dir: /tmp/sonar-sobusa-b207557.fys4nw
+10:53:38.062 INFO  Load quality profiles
+10:53:38.105 INFO  Load quality profiles (done) | time=42ms
+10:53:38.114 INFO  Load active rules
+10:53:38.244 INFO  Load active rules (done) | time=130ms
+10:53:38.247 INFO  Load analysis cache
+10:53:38.269 INFO  Load analysis cache | time=22ms
+10:53:38.307 INFO  Preprocessing files...
+10:53:38.399 INFO  2 languages detected in 85 preprocessed files (done) | time=92ms
+10:53:38.400 INFO  0 files ignored because of inclusion/exclusion patterns
+10:53:38.400 INFO  0 files ignored because of scm ignore settings
+10:53:38.400 INFO  Loading plugins for detected languages
+10:53:38.400 INFO  Load/download plugins
+10:53:38.408 INFO  Load/download plugins (done) | time=7ms
+10:53:38.466 INFO  Load project repositories
+10:53:38.522 INFO  Load project repositories (done) | time=56ms
+10:53:38.532 INFO  Indexing files...
+10:53:38.532 INFO  Project configuration:
+10:53:38.532 INFO    Excluded sources: **/.env*, **/datos/**, **/data/**, **/respaldo*/**, **/*backup*, **/modelos/**, **/models/**, **/wheelhouse/**, **/resultados*/**, **/__pycache__/**, **/.venv/**, **/venv/**, **/docs/**
+10:53:38.539 INFO  85 files indexed (done) | time=7ms
+10:53:38.539 INFO  Quality profile for docker: Sonar way core
+10:53:38.539 INFO  Quality profile for py: Sonar way core
+10:53:38.539 INFO  ------------- Run sensors on module sobusa-frecuencias
+10:53:38.555 INFO  Load metrics repository
+10:53:38.573 INFO  Load metrics repository (done) | time=18ms
+10:53:38.789 INFO  Sensor IaC YAML File Type Classification Sensor [iac]
+10:53:38.791 INFO  Sensor IaC YAML File Type Classification Sensor [iac] (done) | time=1ms
+10:53:38.791 INFO  Sensor IaC hadolint report Sensor [iac]
+10:53:38.791 INFO  Sensor IaC hadolint report Sensor [iac] (done) | time=0ms
+10:53:38.791 INFO  Sensor Java Config Sensor [iac]
+10:53:38.791 INFO  There are no files to be analyzed for the Java language
+10:53:38.791 INFO  Sensor Java Config Sensor [iac] (done) | time=0ms
+10:53:38.791 INFO  Sensor IaC Docker Sensor [iac]
+10:53:38.820 INFO  1 source file to be analyzed
+10:53:38.898 INFO  1/1 source file has been analyzed
+10:53:38.898 INFO  Sensor IaC Docker Sensor [iac] (done) | time=106ms
+10:53:38.898 INFO  Sensor Python Sensor [python]
+10:53:39.133 INFO  Starting global symbols computation
+10:53:39.133 INFO  74 source files to be analyzed
+10:53:40.245 INFO  74/74 source files have been analyzed
+10:53:40.245 INFO  Finished step global symbols computation in 1111ms
+10:53:40.294 INFO  Starting rules execution
+10:53:40.295 INFO  74 source files to be analyzed
+10:53:41.341 INFO  74/74 source files have been analyzed
+10:53:41.341 INFO  Finished step rules execution in 1047ms
+10:53:41.341 INFO  The Python analyzer was able to leverage cached data from previous analyses for 0 out of 74 files. These files were not parsed.
+10:53:41.343 INFO  Sensor Python Sensor [python] (done) | time=2444ms
+10:53:41.343 INFO  Sensor Cobertura Sensor for Python coverage [python]
+10:53:41.348 INFO  Sensor Cobertura Sensor for Python coverage [python] (done) | time=5ms
+10:53:41.348 INFO  Sensor PythonXUnitSensor [python]
+10:53:41.353 INFO  Sensor PythonXUnitSensor [python] (done) | time=4ms
+10:53:41.353 INFO  Sensor Python Dependency Sensor [python]
+10:53:41.354 INFO  Sensor Python Dependency Sensor [python] (done) | time=1ms
+10:53:41.354 INFO  Sensor TextAndSecretsSensor [text]
+10:53:41.369 INFO  Available processors: 8
+10:53:41.369 INFO  Using 8 threads for analysis.
+10:53:41.500 INFO  Start fetching files for the text and secrets analysis
+10:53:41.517 INFO  Using Git CLI to retrieve dirty files
+10:53:41.539 INFO  Retrieving language associated files and files included via "sonar.text.inclusions" that are tracked by git
+10:53:41.539 INFO  Starting the text and secrets analysis
+10:53:41.540 INFO  75 source files to be analyzed for the text and secrets analysis
+10:53:41.627 INFO  75/75 source files have been analyzed for the text and secrets analysis
+10:53:41.628 INFO  Sensor TextAndSecretsSensor [text] (done) | time=273ms
+10:53:41.629 INFO  ------------- Run sensors on project
+10:53:41.706 INFO  Sensor IaC Project Sensor [iac]
+10:53:41.707 INFO  Sensor IaC Project Sensor [iac] (done) | time=0ms
+10:53:41.707 INFO  Sensor Zero Coverage Sensor
+10:53:41.717 INFO  Sensor Zero Coverage Sensor (done) | time=10ms
+10:53:41.718 INFO  ------------- Gather SCA dependencies on project
+10:53:41.720 INFO  Dependency analysis skipped
+10:53:41.726 INFO  SCM Publisher SCM provider for this project is: git
+10:53:41.727 INFO  SCM Publisher 1 source file to be analyzed
+10:53:41.973 INFO  SCM Publisher 1/1 source file have been analyzed (done) | time=245ms
+10:53:41.979 INFO  CPD Executor 9 files had no CPD blocks
+10:53:41.979 INFO  CPD Executor Calculating CPD for 45 files
+10:53:41.990 INFO  CPD Executor CPD calculation finished (done) | time=11ms
+10:53:41.993 INFO  SCM revision ID 'b2075570df7ed7a115185cc56ccf069b2373d6be'
+10:53:42.060 INFO  Analysis report generated in 61ms, dir size=1.1 MB
+10:53:42.278 INFO  Analysis report compressed in 217ms, zip size=640.6 kB
+10:53:42.351 INFO  Analysis report uploaded in 71ms
+10:53:42.351 INFO  ANALYSIS SUCCESSFUL, you can find the results at: http://localhost:9100/dashboard?id=sobusa-frecuencias
+10:53:42.351 INFO  Note that you will be able to access the updated dashboard once the server has processed the submitted analysis report
+10:53:42.352 INFO  More about the report processing at http://localhost:9100/api/ce/task?id=5facc604-c5e1-43bc-8ca7-3546200b1ab8
+10:53:42.399 INFO  Analysis total time: 6.949 s
+10:53:42.451 INFO  SonarScanner Engine completed successfully
+10:53:42.486 INFO  EXECUTION SUCCESS
+10:53:42.487 INFO  Total time: 9.670s
