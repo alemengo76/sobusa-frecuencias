@@ -368,6 +368,9 @@ def explicar_prediccion(prediction_id: int) -> dict:
         raise Conflicto(f"data_cutoff {p['data_cutoff']} no es el inicio de un día")
     if ejecucion is None:
         raise Conflicto(f"La ejecución {eid} de la predicción no está registrada")
+    if ejecucion.get("tipo") != "prediccion" or ejecucion.get("estado") != "exitosa":
+        raise Conflicto(f"La ejecución {eid} no es una ejecución de predicción exitosa "
+                        f"(tipo {ejecucion.get('tipo')!r}, estado {ejecucion.get('estado')!r})")
     if not filas or any(int(f["model_id"]) != int(p["model_id"]) or f["model_version"] != p["model_version"]
                         or XG.instante_local(f["data_cutoff"]) != dia for f in filas):
         raise Conflicto(f"La ejecución {eid} no tiene un único modelo y corte de datos para la ruta {idruta}")
