@@ -4,11 +4,12 @@ import uuid
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, FastAPI, Query, Request
+from fastapi import APIRouter, Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app import evaluacion_real, servicios
+from app.api.autorizacion import requerir_admin, requerir_operador
 from app.api.esquemas import (ActivacionModelo, CambioEstadoAlerta, ErrorRespuesta, ExplicacionPrediccion,
                               PaginaErroresCalidad, SolicitudFrecuencias, SolicitudPrediccion,
                               SolicitudRecomendacion)
@@ -43,6 +44,7 @@ async def correlacion(request: Request, call_next):
 @app.exception_handler(ErrorAPI)
 async def manejar_error_api(_: Request, e: ErrorAPI):
     return JSONResponse(status_code=e.estado_http,
+                        headers={"WWW-Authenticate": "Bearer"} if e.estado_http == 401 else None,
                         content=cuerpo_error(e.codigo, e.mensaje, correlation_id.get(), e.detalle))
 
 
@@ -77,6 +79,8 @@ AgruparPor = Query(["idruta", "horizonte_min"])
 # Respuestas de error documentadas en OpenAPI (no cambian el comportamiento). Cada ruta declara
 # solo los códigos que su código puede producir; todas usan el formato uniforme ErrorRespuesta.
 DESCRIPCION_ERRORES = {
+    401: "Se requiere una credencial Bearer válida",
+    403: "La credencial no autoriza esta operación",
     404: "Recurso no encontrado",
     409: "Conflicto con el estado actual",
     422: "Solicitud inválida: no cumple el esquema o una regla de validación",
@@ -96,7 +100,7 @@ def salud():
 # ------------------------------------------------------------------ 1-2. frecuencias
 
 @v1.post("/frequency/executions", status_code=201, tags=["frecuencias"],
-         responses=errores(409, 422, 500))
+         dependencies=[Depends(requerir_operador)], responses=errores(401, 403, 409, 422, 500))
 def crear_ejecucion_frecuencias(s: SolicitudFrecuencias):
     """Predicción + recomendación + alertas en una sola ejecución trazable."""
     return servicios.ejecutar_frecuencias(s.idrutas, _dia(s.dia), s.horizontes, s.base_demanda,
@@ -116,7 +120,7 @@ def obtener_ejecucion(execution_id: uuid.UUID):
 # ------------------------------------------------------------------ 3-4. predicciones
 
 @v1.post("/predictions/run", status_code=201, tags=["predicciones"],
-         responses=errores(409, 422, 500))
+         dependencies=[Depends(requerir_admin)], responses=errores(401, 403, 409, 422, 500))
 def correr_predicciones(s: SolicitudPrediccion):
     r = servicios.ejecutar_predicciones(s.idrutas, _dia(s.dia), s.horizontes, correlation_id.get())
     return {k: v for k, v in r.items() if not k.startswith("_")}
@@ -194,7 +198,7 @@ def pares_prediccion_real(model_id: int | None = None, execution_id: uuid.UUID |
 # ------------------------------------------------------------------ 5-6. recomendaciones
 
 @v1.post("/recommendations/calculate", status_code=201, tags=["recomendaciones"],
-         responses=errores(404, 422, 500))
+         dependencies=[Depends(requerir_admin)], responses=errores(401, 403, 404, 422, 500))
 def calcular_recomendaciones(s: SolicitudRecomendacion):
     with escribir() as c:
         pred = servicios.predicciones_de_ejecucion(c, s.execution_id_prediccion)
@@ -235,7 +239,7 @@ def listar_alertas(idruta: int | None = None, estado: str | None = None,
 
 
 @v1.patch("/alerts/{alert_id}/status", tags=["alertas"],
-          responses=errores(404, 409, 422, 500))
+          dependencies=[Depends(requerir_admin)], responses=errores(401, 403, 404, 409, 422, 500))
 def cambiar_estado_alerta(alert_id: int, s: CambioEstadoAlerta):
     """Reconocer, asignar, comentar (mismo estado + comentario), cerrar o descartar."""
     return servicios.cambiar_estado_alerta(alert_id, s.estado, s.usuario, s.comentario,
@@ -252,7 +256,7 @@ def listar_modelos():
 
 
 @v1.post("/models/{model_id}/activate", tags=["modelos"],
-         responses=errores(404, 409, 422, 500))
+         dependencies=[Depends(requerir_admin)], responses=errores(401, 403, 404, 409, 422, 500))
 def activar_modelo(model_id: int, s: ActivacionModelo):
     """Activa un modelo y retira el anterior. Para revertir, active de nuevo el anterior."""
     with escribir() as c:

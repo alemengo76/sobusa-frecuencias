@@ -61,6 +61,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from zipfile import ZipFile
 
 import numpy as np
 import pandas as pd
@@ -563,6 +564,26 @@ def _donde(fila: int, ident: object) -> str:
     return f"fila {fila}" + (f", id {ident}" if ident is not None else "")
 
 
+def _normalizar_xml_xlsx(contenido: bytes) -> bytes:
+    """Corrige CRLF reintroducido por el escritor XML de texto en Windows."""
+    with ZipFile(io.BytesIO(contenido)) as original:
+        cambios = {}
+        for nombre in original.namelist():
+            if nombre.startswith("xl/worksheets/") and nombre.endswith(".xml"):
+                xml = original.read(nombre)
+                if b"\r" in xml:
+                    cambios[nombre] = xml.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        if not cambios:
+            return contenido
+        buffer = io.BytesIO()
+        with ZipFile(buffer, "w") as nuevo:
+            for entrada in original.infolist():
+                datos = (cambios[entrada.filename] if entrada.filename in cambios
+                         else original.read(entrada))
+                nuevo.writestr(entrada, datos)
+        return buffer.getvalue()
+
+
 def a_xlsx(df: pd.DataFrame, metadatos: Mapping[str, object] | None = None, *,
            columna_id: str | None = None) -> bytes:
     """XLSX con la hoja 'datos' y, si hay metadatos, la hoja 'exportacion'.
@@ -588,4 +609,4 @@ def a_xlsx(df: pd.DataFrame, metadatos: Mapping[str, object] | None = None, *,
                          _valor_xlsx(_a_texto(str(valor)), "valor", 0, None)])
     buffer = io.BytesIO()
     libro.save(buffer)
-    return buffer.getvalue()
+    return _normalizar_xml_xlsx(buffer.getvalue())

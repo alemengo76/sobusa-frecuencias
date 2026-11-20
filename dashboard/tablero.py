@@ -34,6 +34,7 @@ except ModuleNotFoundError:            # streamlit run agrega dashboard/ a sys.p
     import graficos as gr
 
 API = os.environ.get("API_URL", cl.API_POR_DEFECTO)
+SOLO_LECTURA = os.environ.get("SOBUSA_DEMO_READ_ONLY") == "1"
 NOMBRES = {2: "2 · SILENCIO", 16: "16 · CRA 54", 21: "21 · CALLE 72"}
 BOGOTA = timezone(timedelta(hours=-5))   # America/Bogota no tiene horario de verano
 MESES = ("ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic")
@@ -353,6 +354,14 @@ if "_ir_a" in st.session_state:          # navegación pedida por otra sección 
 with st.sidebar:
     _html(es.logo_lateral())
     st.session_state.setdefault("seccion", SECCIONES[1])
+    if SOLO_LECTURA:
+        st.caption("Demostración de solo lectura")
+        credencial_escritura = ""
+    else:
+        credencial_escritura = st.text_input(
+            "Credencial Bearer", type="password", key="credencial_escritura",
+            help="Operador o administrador para despachar. Administrador para recalcular, gestionar alertas o activar modelos.",
+        ).strip()
     seccion = st.radio("Sección", SECCIONES, key="seccion", label_visibility="collapsed")
     if st.button("Actualizar datos", key="actualizar_datos",
                  help="Vuelve a consultar la API (descarta lo guardado en esta sesión)."):
@@ -430,7 +439,8 @@ def _formulario_ejecucion(dia: date, idruta: int) -> None:
                   "horizontes": sorted(int(h) for h in horizontes), "base_demanda": base}
         with st.spinner("Calculando: predicción, recomendación y alertas…"):
             r, err = _enviar("frecuencias", lambda: cl.validar_ejecucion_frecuencias(cl.solicitar(
-                "POST", "frequency/executions", json=cuerpo, timeout=cl.TIEMPO_EJECUCION, modifica=True)))
+                "POST", "frequency/executions", json=cuerpo, timeout=cl.TIEMPO_EJECUCION,
+                modifica=True, credencial=credencial_escritura)))
         # Con o sin respuesta, lo consultado antes puede haber cambiado
         _invalidar_datos("Se intentó calcular frecuencias: se descartó la exportación preparada.")
         if err is not None:
@@ -488,7 +498,8 @@ def _formulario_recomendaciones() -> None:
         cuerpo = {"execution_id_prediccion": origen, "base_demanda": base}
         with st.spinner("Calculando recomendaciones…"):
             r, err = _enviar("recomendaciones", lambda: cl.validar_calculo_recomendaciones(cl.solicitar(
-                "POST", "recommendations/calculate", json=cuerpo, timeout=cl.TIEMPO_EJECUCION, modifica=True)))
+                "POST", "recommendations/calculate", json=cuerpo, timeout=cl.TIEMPO_EJECUCION,
+                modifica=True, credencial=credencial_escritura)))
         _invalidar_datos("Se intentó calcular recomendaciones: se descartó la exportación preparada.")
         if err is not None:
             _error(err, "Calcular recomendaciones.", escritura=True)
@@ -507,6 +518,25 @@ def _leer_dia(conjunto: ex.Conjunto, filtros: dict) -> list[dict]:
                                               for k, v in filtros.items()))
     res = _cache(clave, lambda: ex.traer_todo(cl.get_para_exportar, conjunto, filtros, limite_filas=LIMITE_GRAFICA))
     return res.datos.to_dict("records")
+
+
+def _validar_filas_despacho(base, eleccion, preds, recs) -> None:
+    def franja(fila):
+        return pd.to_datetime(fila["franja_inicio"], utc=True)
+
+    for filas, clave in ((preds, "pred"), (recs, "rec")):
+        if any(fila["execution_id"] != eleccion[clave] or fila["idruta"] != base["idruta"]
+               or fila["horizonte_min"] != base["horizonte_min"]
+               or not base["desde"] <= franja(fila) < base["hasta"] for fila in filas):
+            raise ValueError("La API devolvió filas ajenas al despacho o a sus filtros.")
+    por_id = {fila["prediction_id"]: fila for fila in preds}
+    if (len(por_id) != len(preds)
+        or len({(fila["model_id"], fila["model_version"]) for fila in preds}) > 1
+        or (eleccion["pred"] and eleccion["rec"] and any(
+            fila["prediction_id"] not in por_id or franja(fila) != franja(por_id[fila["prediction_id"]])
+            for fila in recs
+        ))):
+        raise ValueError("Las predicciones y recomendaciones del despacho no son coherentes.")
 
 
 def _resolver_manual(eid: str) -> dict:
@@ -574,8 +604,9 @@ def _contexto_demanda():
             manual = st.text_input("Ejecución (id, opcional)", key="ejecucion_manual",
                                    help="Pegue un execution_id para ver exactamente esa ejecución. Vacío: "
                                         "se listan las ejecuciones con filas en el día.").strip()
-        _formulario_ejecucion(dia, idruta)
-        _formulario_recomendaciones()
+        if not SOLO_LECTURA:
+            _formulario_ejecucion(dia, idruta)
+            _formulario_recomendaciones()
     return idruta, horizonte, dia, manual
 
 
@@ -622,8 +653,9 @@ def _seccion_demanda() -> None:
         opciones = _opciones_ejecucion(str(dia), idruta, todas_p, todas_r)
         if not opciones:
             _html(es.vacio(f"No hay predicciones ni recomendaciones de la ruta {NOMBRES[idruta]} a "
-                           f"{horizonte} min para el {_fecha(_iso(desde), False)}. Puede crear una ejecución "
-                           "con «Calcular frecuencias del día»."))
+                           f"{horizonte} min para el {_fecha(_iso(desde), False)}."
+                           + ("" if SOLO_LECTURA else
+                              " Puede crear una ejecución con «Calcular frecuencias del día».")))
             return
         if len(opciones) > 1:
             st.caption(f"Hay {len(opciones)} ejecuciones con filas en este día. Se muestra una sola a la vez "
@@ -633,6 +665,13 @@ def _seccion_demanda() -> None:
         eleccion = opciones[indice]
         preds = [p for p in todas_p if eleccion["pred"] and p.get("execution_id") == eleccion["pred"]]
         recs = [r for r in todas_r if eleccion["rec"] and r.get("execution_id") == eleccion["rec"]]
+
+    if SOLO_LECTURA:
+        try:
+            _validar_filas_despacho(base, eleccion, preds, recs)
+        except (ValueError, TypeError, KeyError) as e:
+            st.error(f"No se pudo verificar el despacho. {_mensaje_error(e)}")
+            return
 
     _pildoras_contexto(dia, eleccion, preds)
     vista = st.radio("Vista", ("01 · Análisis y visualizaciones", "02 · Decisión operativa"), index=0,
@@ -1090,6 +1129,8 @@ def _gestion_alerta(alertas: list[dict]) -> None:
         st.text(a.get("explicacion") or es.SIN_DATO)          # texto plano: nunca Markdown
         st.text(a.get("recomendacion") or es.SIN_DATO)
 
+    if SOLO_LECTURA:
+        return
     _html(es.encabezado("Gestionar", None, "PATCH /alerts/{id}/status"))
     if _bloqueada(f"alerta_{aid}"):
         return
@@ -1128,6 +1169,11 @@ def _gestion_alerta(alertas: list[dict]) -> None:
 
 def _patch_alerta(aid, nuevo, usuario, comentario, asignado) -> None:
     """PATCH con los mensajes de la versión anterior (probados en tests/unit/test_tablero.py)."""
+    try:
+        opciones = cl.opciones_bearer(credencial_escritura)
+    except cl.ErrorApi as e:
+        _error(e, "Actualizar la alerta.", escritura=True)
+        return
     _invalidar_exportacion(AVISO_PATCH)
     st.session_state["_generacion"] = _generacion() + 1
     st.session_state.pop("_cache", None)
@@ -1140,7 +1186,11 @@ def _patch_alerta(aid, nuevo, usuario, comentario, asignado) -> None:
             json={"estado": nuevo, "usuario": usuario, "comentario": comentario or None,
                   "usuario_asignado": asignado or None},
             timeout=10,
+            **opciones,
         )
+        if credencial_escritura and 300 <= r.status_code < 400:
+            st.error("La API devolvió una redirección. Revise la alerta antes de reintentar.")
+            return
         r.raise_for_status()
         resultado = r.json()
     except requests.Timeout:
@@ -1150,7 +1200,8 @@ def _patch_alerta(aid, nuevo, usuario, comentario, asignado) -> None:
     except requests.HTTPError as e:
         respuesta = e.response
         codigo = respuesta.status_code if respuesta is not None else "desconocido"
-        mensajes = {404: "La alerta solicitada no existe.",
+        mensajes = {401: cl.TEXTO_CODIGO[401], 403: cl.TEXTO_CODIGO[403],
+                    404: "La alerta solicitada no existe.",
                     409: "La operación no está permitida por el estado actual de la alerta.",
                     422: "Los datos enviados no cumplen las validaciones.",
                     500: "La API encontró un error interno."}
@@ -1164,8 +1215,8 @@ def _patch_alerta(aid, nuevo, usuario, comentario, asignado) -> None:
                 pass
         error_api = cuerpo_error.get("error", {}) if isinstance(cuerpo_error, dict) else {}
         if isinstance(error_api, dict):
-            mensaje_api = error_api.get("mensaje")
-            correlation_id = error_api.get("correlation_id")
+            mensaje_api = cl.ocultar_credencial(error_api.get("mensaje"), credencial_escritura)
+            correlation_id = cl.ocultar_credencial(error_api.get("correlation_id"), credencial_escritura)
             if mensaje_api:
                 texto_error += f" Mensaje de la API: {es.md(mensaje_api)}"
             if correlation_id:
@@ -1514,7 +1565,8 @@ def _seccion_modelos() -> None:
         elif ERROR_MODELOS is None:
             _html(es.vacio("No hay modelos registrados."))
     with c2, st.container(border=True):
-        _activacion(modelos)
+        if not SOLO_LECTURA:
+            _activacion(modelos)
     if modelos:
         por_id = {m.get("model_id"): m for m in modelos}
         with st.container(border=True):
@@ -1577,8 +1629,7 @@ def _activacion(modelos: list[dict]) -> None:
         return
     if _bloqueada("activacion"):
         return
-    # Candidatos y retirados (reversión). Los rechazados no se ofrecen: el backend no lo impide
-    # (servicios.verificar_activable solo comprueba el artefacto de un GBM), así que lo impide el tablero.
+    # La API y el repositorio también rechazan la activación de modelos rechazados.
     elegibles = [m for m in modelos if m.get("estado") in ("candidato", "retirado")]
     rechazados = sum(1 for m in modelos if m.get("estado") == "rechazado")
     if rechazados:
@@ -1612,7 +1663,7 @@ def _activacion(modelos: list[dict]) -> None:
     anterior = ACTIVO.get("model_id") if ACTIVO else None
     r, err = _enviar("activacion", lambda: cl.validar_activacion(cl.solicitar(
         "POST", f"models/{mid}/activate", json={"usuario": usuario, "motivo": motivo},
-        timeout=cl.TIEMPO_ESCRITURA, modifica=True), mid))
+        timeout=cl.TIEMPO_ESCRITURA, modifica=True, credencial=credencial_escritura), mid))
     _invalidar_datos("Se intentó cambiar el modelo activo: se descartó la exportación preparada.")
     if err is not None:
         if err.codigo_http == 409 and not err.no_confirmada:

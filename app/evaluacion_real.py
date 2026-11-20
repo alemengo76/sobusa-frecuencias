@@ -59,7 +59,7 @@ def horarios_por_modelo(c, model_ids) -> tuple[pd.DataFrame | None, dict, list]:
 def evaluar(c, model_id: int | None = None, execution_id: str | None = None,
             idruta: int | None = None, horizonte_min: int | None = None,
             desde: datetime | None = None, hasta: datetime | None = None,
-            execution_ids: list[str] | None = None) -> dict:
+            execution_ids: list[str] | None = None, *, completitud=None) -> dict:
     """Devuelve {'pares': DataFrame, 'parametros': dict, 'huella': str, 'modelos': dict}."""
     if desde is not None and hasta is not None and desde >= hasta:
         raise SolicitudInvalida("desde debe ser anterior a hasta")
@@ -97,6 +97,7 @@ def evaluar(c, model_id: int | None = None, execution_id: str | None = None,
         "margen_consolidacion_dias": margen,
         "corte_consolidacion": _iso(cr.corte_consolidacion(marca, margen)),
         "fuente_real": "ai_frecuencias.demanda_franja (comun-1.5, salida programada)",
+        "politica_completitud": "requiere_evidencia_por_ruta_y_dia",
     }
 
     pred = lr.predicciones(c, **filtros) if n else pd.DataFrame(columns=cr.COLUMNAS_PREDICCION)
@@ -105,7 +106,8 @@ def evaluar(c, model_id: int | None = None, execution_id: str | None = None,
         p = cr._normalizar(pred)
         ini = p.franja_inicio.min() - pd.Timedelta(days=cr.DIAS_INGENUO)
         fin = p.franja_inicio.max() + pd.Timedelta(minutes=max(cr.HORIZONTES))
-        franjas = lr.franjas_reales(c, sorted(p.idruta.dropna().astype(int).unique()),
+        rutas = sorted(p.idruta.dropna().astype(int).unique())
+        franjas = lr.franjas_reales(c, rutas,
                                     ini.to_pydatetime(), fin.to_pydatetime())
         for _, f in pred.drop_duplicates("model_id").iterrows():
             modelos[int(f.model_id)] = {"nombre": f.get("modelo_nombre"),
@@ -114,7 +116,10 @@ def evaluar(c, model_id: int | None = None, execution_id: str | None = None,
         horario, parametros["horario_operacion"], avisos = horarios_por_modelo(c, modelos)
         if avisos:
             parametros["advertencias"] = avisos
-        pares = cr.emparejar(pred, franjas, marca, margen, horario)
+        # No se presume completitud a partir de la marca global ni de una franja presente.
+        if completitud is None:
+            completitud = lr.completitud_por_dia(c, rutas, ini, fin)
+        pares = cr.emparejar(pred, franjas, marca, margen, horario, completitud=completitud)
     else:
         pares = cr.emparejar(pred, pd.DataFrame(), marca, margen)
     return {"pares": pares, "parametros": parametros, "modelos": modelos,

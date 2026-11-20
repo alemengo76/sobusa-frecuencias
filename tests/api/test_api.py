@@ -15,7 +15,13 @@ from fastapi.testclient import TestClient  # noqa: E402
 from app.api import main  # noqa: E402
 from app.core.errores import Conflicto  # noqa: E402
 
-cliente = TestClient(main.app, raise_server_exceptions=False)
+cliente = TestClient(main.app, raise_server_exceptions=False,
+                     headers={"Authorization": "Bearer token-pruebas-admin"})
+
+
+@pytest.fixture(autouse=True)
+def credencial_de_prueba(monkeypatch):
+    monkeypatch.setenv("SOBUSA_ADMIN_TOKEN", "token-pruebas-admin")
 
 
 @contextmanager
@@ -93,6 +99,24 @@ def test_transicion_invalida_da_409(_):
 def test_activar_modelo(_):
     r = cliente.post("/api/v1/models/2/activate", json={"usuario": "ana", "motivo": "mejor WAPE"})
     assert r.status_code == 200 and r.json()["modelo_anterior"] == 1
+
+
+@pytest.mark.parametrize("estado_antes_del_bloqueo", ["rechazado", "candidato"])
+def test_activacion_rechazada_da_409_sin_escrituras(estado_antes_del_bloqueo):
+    inicial = {"model_id": 9, "estado": estado_antes_del_bloqueo, "hiperparametros": {}}
+    with patch("app.api.main.escribir") as escribir, \
+         patch("app.api.main.repo.listar_modelos", return_value=[inicial]):
+        conexion = escribir.return_value.__enter__.return_value
+        conexion.execute.return_value.mappings.return_value.first.return_value = {
+            **inicial, "estado": "rechazado",
+        }
+        r = cliente.post("/api/v1/models/9/activate", json={"usuario": "ana", "motivo": "probar"})
+    assert r.status_code == 409 and r.json()["error"]["codigo"] == "conflicto"
+    sql = [str(llamada.args[0]).strip() for llamada in conexion.execute.call_args_list]
+    if estado_antes_del_bloqueo == "rechazado":
+        assert sql == []
+    else:
+        assert len(sql) == 2 and "pg_advisory_xact_lock" in sql[0] and "FOR UPDATE" in sql[1]
 
 
 @patch("app.api.main.servicios.ejecutar_frecuencias", side_effect=RuntimeError("falla"))

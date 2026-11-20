@@ -132,6 +132,8 @@ def verificar_activable(c, model_id: int) -> None:
     """Un GBM solo se activa si su artefacto existe, su hash coincide y lo puede abrir esta
     versión de scikit-learn. Así la activación no deja la API funcionando solo con el respaldo."""
     m = next((x for x in repo.listar_modelos(c) if x["model_id"] == model_id), None)
+    if m is not None and m["estado"] == "rechazado":
+        raise Conflicto(f"No se puede activar el modelo {model_id}: está rechazado")
     if m is None or (m.get("hiperparametros") or {}).get("metodo") != modelo_gbm.METODO:
         return
     try:
