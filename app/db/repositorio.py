@@ -287,6 +287,35 @@ def consultar(c, tabla: str, filtros: dict, desde=None, hasta=None, pagina=1, ta
     return [dict(f) for f in filas], int(total)
 
 
+# ------------------------------------------------------------------ explicación de predicciones (RF-015, solo lectura)
+
+def obtener_prediccion(c, prediction_id: int) -> dict | None:
+    fila = c.execute(text("SELECT * FROM ai_frecuencias.prediction WHERE prediction_id = :p"),
+                     {"p": prediction_id}).mappings().first()
+    return dict(fila) if fila else None
+
+
+def obtener_modelo(c, model_id: int) -> dict | None:
+    fila = c.execute(text("SELECT * FROM ai_frecuencias.model_registry WHERE model_id = :m"),
+                     {"m": model_id}).mappings().first()
+    return dict(fila) if fila else None
+
+
+def predicciones_ejecucion_ruta(c, execution_id: str, idruta: int) -> list[dict]:
+    """Todas las predicciones que guardó una ejecución para una ruta (todos los horizontes)."""
+    return [dict(f) for f in c.execute(text(
+        """SELECT * FROM ai_frecuencias.prediction WHERE execution_id = :e AND idruta = :r
+           ORDER BY horizonte_min, franja_inicio"""), {"e": execution_id, "r": idruta}).mappings()]
+
+
+def ultima_carga_viajes(c, idruta: int, desde: datetime, hasta: datetime):
+    """Momento de la carga más reciente de los viajes de la ruta con salida en [desde, hasta)."""
+    return c.execute(text(
+        """SELECT max(cargado_en) FROM ai_frecuencias.viaje_fuente
+           WHERE idruta = :r AND fechasalida >= :d AND fechasalida < :h"""),
+        {"r": idruta, "d": desde, "h": hasta}).scalar()
+
+
 # ------------------------------------------------------------------ G3: errores de calidad por lote
 
 # Condición de lote según el alcance. Cada una va COMPLETA entre paréntesis: los filtros opcionales
