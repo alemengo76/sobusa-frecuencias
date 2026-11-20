@@ -73,7 +73,7 @@ def _conexion():
 def repo_falso(e, *, prediccion=None, modelo=None, filas=None, crudo=None, ultima_carga=CARGA_PREVIA,
                ejecucion="por_defecto"):
     prediccion = e["pedida"] if prediccion is None else prediccion
-    ejecucion = {"execution_id": EID, "tipo": "prediccion", "iniciada_en": INICIO_EJECUCION} \
+    ejecucion = {"execution_id": EID, "tipo": "prediccion", "estado": "exitosa", "iniciada_en": INICIO_EJECUCION} \
         if ejecucion == "por_defecto" else ejecucion
     G.cargar.cache_clear()
     with patch("app.db.conexion.consultar_resultados", _conexion), \
@@ -197,7 +197,8 @@ def test_cambio_en_otra_fila_de_la_ejecucion_tambien_rechaza(entorno):
         servicios.explicar_prediccion(entorno["pedida"]["prediction_id"])
 
 
-@pytest.mark.parametrize("caso", ["falta_franja", "otro_modelo", "otro_corte", "sin_ejecucion", "corte_no_dia"])
+@pytest.mark.parametrize("caso", ["falta_franja", "otro_modelo", "otro_corte", "sin_ejecucion", "corte_no_dia",
+                                  "ejecucion_fallida", "ejecucion_de_otro_tipo"])
 def test_ejecucion_incoherente_se_rechaza(entorno, caso):
     filas, p, ejecucion = [dict(f) for f in entorno["filas"]], dict(entorno["pedida"]), "por_defecto"
     if caso == "falta_franja":
@@ -210,6 +211,10 @@ def test_ejecucion_incoherente_se_rechaza(entorno, caso):
         ejecucion = None
     elif caso == "corte_no_dia":
         p["data_cutoff"] = p["data_cutoff"] + timedelta(hours=6)
+    elif caso == "ejecucion_fallida":
+        ejecucion = {"execution_id": EID, "tipo": "prediccion", "estado": "fallida", "iniciada_en": INICIO_EJECUCION}
+    elif caso == "ejecucion_de_otro_tipo":
+        ejecucion = {"execution_id": EID, "tipo": "frecuencias", "estado": "exitosa", "iniciada_en": INICIO_EJECUCION}
     with repo_falso(entorno, prediccion=p, filas=filas, ejecucion=ejecucion), pytest.raises(Conflicto):
         servicios.explicar_prediccion(p["prediction_id"])
 
