@@ -7,6 +7,7 @@ recomendacion y clave_dedup. El estado inicial siempre es 'abierta'.
 """
 import hashlib
 
+import numpy as np
 import pandas as pd
 
 from app.alertas.catalogo import CATALOGO, HORIZONTE_ALERTAS_FRECUENCIA, TRANSICIONES
@@ -130,26 +131,98 @@ def alt_005_007(obs: pd.DataFrame, u: dict) -> list:
     return out
 
 
-def alt_006(salidas: pd.DataFrame, u: dict) -> list:
-    """salidas: idruta, idprogramacion, fechasalida (programada), fechainicio (real),
-    cancelada ('S'/'N')."""
+# ALT-006 (contrato `alt006-v2`, docs del proyecto: ALT006_contrato_2026-11-20). Constantes de la versión
+# de la regla; el umbral de tolerancia viene de ai_frecuencias.umbral (u["ALT-006"]).
+REGLA_ALT006 = "alt006-v2"
+LIMITE_DESFASE_MIN = 120.0
+RUTAS_ALT006 = (2, 16, 21)
+CLASES_EVALUADAS = ("tardia", "a_tiempo", "ausente")
+
+
+def clasificar_salidas(salidas: pd.DataFrame, tolerancia_min: float, marca, dias_revision: int) -> pd.DataFrame:
+    """Una clase por programación, en este orden:
+    duplicada (todas las apariciones del id) · estado_invalido (cancelada fuera de S/N o sin salida) · futura ·
+    cancelada · no_evaluable (salida + tolerancia > marca) · desfase_extremo (|d| > 120 min) ·
+    tardia (d > tolerancia) · a_tiempo · no_evaluable (sin inicio y salida >= marca - dias_revision) ·
+    ausente (sin inicio y salida < marca - dias_revision).
+    La referencia temporal es la marca de agua, nunca el reloj del sistema. `finalizado` no se usa."""
+    s = salidas[salidas.idruta.isin(RUTAS_ALT006)].copy()
+    s["fechasalida"] = pd.to_datetime(s.fechasalida)
+    s["fechainicio"] = pd.to_datetime(s.fechainicio)
+    marca = pd.Timestamp(marca)
+    tol = pd.Timedelta(minutes=float(tolerancia_min))
+    consolidado = marca - pd.Timedelta(days=int(dias_revision))
+    s["desfase_min"] = (s.fechainicio - s.fechasalida).dt.total_seconds() / 60
+    s["franja_inicio"] = s.fechasalida.dt.floor("15min")
+    dup = s.idprogramacion.duplicated(keep=False)
+    sin_inicio = s.fechainicio.isna()
+    s["clase"] = np.select(
+        [dup,
+         s.fechasalida.isna() | ~s.cancelada.isin(["S", "N"]),
+         s.fechasalida > marca,
+         s.cancelada.eq("S"),
+         s.fechasalida + tol > marca,
+         ~sin_inicio & (s.desfase_min.abs() > LIMITE_DESFASE_MIN),
+         ~sin_inicio & (s.desfase_min > float(tolerancia_min)),
+         ~sin_inicio,
+         s.fechasalida >= consolidado],
+        ["duplicada", "estado_invalido", "futura", "cancelada", "no_evaluable", "desfase_extremo",
+         "tardia", "a_tiempo", "no_evaluable"],
+        default="ausente")
+    return s
+
+
+def alt_006(salidas: pd.DataFrame, u: dict, marca, dias_revision: int) -> list:
+    """salidas: idruta, idprogramacion, fechasalida (programada), fechainicio (real), cancelada (S/N).
+    Una alerta por ruta y franja de 15 min con al menos una programación tardía o sin inicio registrado."""
+    tol = u["ALT-006"]
+    c = clasificar_salidas(salidas, tol, marca, dias_revision)
+    corte = pd.Timestamp(marca) - pd.Timedelta(days=int(dias_revision))
     out = []
-    for r in salidas.itertuples(index=False):
-        if r.cancelada == "S" or pd.isna(r.fechainicio):
-            out.append(_alerta(
-                "ALT-006", r.idruta, None, None, u["ALT-006"], None,
-                f"La salida programada {pd.Timestamp(r.fechasalida):%Y-%m-%d %H:%M} "
-                f"(programación {r.idprogramacion}) no se realizó.",
-                pd.Timestamp(r.fechasalida).floor("15min")))
+    for (ruta, franja), g in c.groupby(["idruta", "franja_inicio"], sort=True):
+        aus = g[g.clase.eq("ausente")].sort_values("idprogramacion")
+        tar = g[g.clase.eq("tardia")].sort_values(["desfase_min", "idprogramacion"], ascending=[False, True])
+        if aus.empty and tar.empty:
             continue
-        retraso = (pd.Timestamp(r.fechainicio) - pd.Timestamp(r.fechasalida)).total_seconds() / 60
-        if retraso > u["ALT-006"]:
-            out.append(_alerta(
-                "ALT-006", r.idruta, retraso, 0, u["ALT-006"], retraso / u["ALT-006"] - 1,
-                f"La salida de las {pd.Timestamp(r.fechasalida):%H:%M} (programación "
-                f"{r.idprogramacion}) salió {retraso:.0f} min tarde.",
-                pd.Timestamp(r.fechasalida).floor("15min")))
+        n_eval = int(g.clase.isin(CLASES_EVALUADAS).sum())
+        n_can = int(g.clase.eq("cancelada").sum())
+        maximo = None if tar.empty else float(tar.desfase_min.max())
+        partes = [f"Ruta {ruta}, franja {franja:%Y-%m-%d %H:%M}-{franja + pd.Timedelta(minutes=15):%H:%M}: "
+                  f"{n_eval} programaciones evaluadas"]
+        if len(aus):
+            partes.append(f"{len(aus)} sin inicio registrado ({', '.join(str(int(x)) for x in aus.idprogramacion)})")
+        if len(tar):
+            partes.append(f"{len(tar)} con inicio más de {tol:g} min tarde ("
+                          + ", ".join(f"{int(r.idprogramacion)} +{r.desfase_min:.0f} min" for r in tar.itertuples())
+                          + f"); retraso máximo {maximo:.0f} min")
+        partes.append(f"{n_can} canceladas no evaluadas")
+        explicacion = ("; ".join(partes) + f". Reloj: marca de agua {pd.Timestamp(marca)}; las ausencias solo "
+                       f"se evalúan con salida anterior a {corte}. «Sin inicio registrado» no prueba que el bus "
+                       f"no saliera. Regla {REGLA_ALT006}, límite de desfase {LIMITE_DESFASE_MIN:g} min.")
+        out.append(_alerta("ALT-006", ruta, maximo, 0, tol, (len(aus) + len(tar)) / n_eval,
+                           explicacion, franja, severidad="alta"))
     return out
+
+
+def diagnostico_alt_006(salidas: pd.DataFrame, u: dict, marca, dias_revision: int) -> dict:
+    """Conteo por clase y casos para diagnóstico. No escribe en ninguna tabla."""
+    c = clasificar_salidas(salidas, u["ALT-006"], marca, dias_revision)
+    cols = ["idruta", "idprogramacion", "fechasalida", "fechainicio", "desfase_min"]
+
+    def filas(clase, extra=()):
+        d = c.loc[c.clase.eq(clase), cols + list(extra)]
+        return [{k: (None if pd.isna(v) else (str(v) if isinstance(v, pd.Timestamp) else v))
+                 for k, v in r.items()} for r in d.to_dict("records")]
+
+    return {"regla": REGLA_ALT006, "marca_agua": str(pd.Timestamp(marca)), "dias_revision": int(dias_revision),
+            "tolerancia_min": float(u["ALT-006"]), "limite_desfase_min": LIMITE_DESFASE_MIN,
+            "conteo_por_clase": {k: int(v) for k, v in c.clase.value_counts().sort_index().items()},
+            "desfase_extremo": filas("desfase_extremo"),
+            "duplicada": filas("duplicada"),
+            "estado_invalido": filas("estado_invalido", ("cancelada",)),
+            "finalizado_por_clase": {f"{k[0]}|{k[1]}": int(v) for k, v in
+                                     c.groupby(["clase", c.finalizado.astype("string").fillna("<nulo>")]).size().items()}
+            if "finalizado" in c else {}}
 
 
 def alt_008(consolidado: pd.DataFrame, u: dict) -> list:
