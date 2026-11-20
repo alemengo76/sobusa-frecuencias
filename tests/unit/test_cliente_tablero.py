@@ -47,6 +47,48 @@ def instalar(monkeypatch, metodo, efecto):
     return falso
 
 
+def test_demo_bloquea_escrituras_y_destinos_distintos_del_loopback(monkeypatch):
+    monkeypatch.setenv("SOBUSA_DEMO_READ_ONLY", "1")
+    for metodo in ("POST", "PATCH"):
+        with pytest.raises(cl.ErrorApi) as error:
+            cl.solicitar(metodo, "models/1/activate", credencial="solo-prueba")
+        assert error.value.codigo_http == 405
+    with pytest.raises(cl.ErrorApi, match="puerto 18010"):
+        cl.solicitar("GET", "models")
+
+
+@pytest.mark.parametrize("metodo,ruta", [
+    ("POST", "frequency/executions"), ("POST", "recommendations/calculate"),
+    ("POST", "models/1/activate"), ("PATCH", "alerts/1/status"),
+])
+def test_envia_bearer_solo_en_escrituras_y_sin_redireccion(monkeypatch, metodo, ruta):
+    monkeypatch.setenv("API_URL", "https://api-falsa.invalid/api/v1")
+    escritura = instalar(monkeypatch, metodo.lower(), respuesta(200, {"ok": True}))
+    lectura = instalar(monkeypatch, "get", respuesta(200, {"ok": True}))
+    cl.solicitar(metodo, ruta, credencial="solo-prueba")
+    cl.solicitar("GET", "models", credencial="solo-prueba")
+    assert escritura.llamadas[0][1]["headers"] == {"Authorization": "Bearer solo-prueba"}
+    assert escritura.llamadas[0][1]["allow_redirects"] is False
+    assert "headers" not in lectura.llamadas[0][1]
+
+
+@pytest.mark.parametrize("codigo,mensaje", [(401, "credencial Bearer"), (403, "rol requerido")])
+def test_rechazo_de_api_es_claro_y_no_refleja_el_token(monkeypatch, codigo, mensaje):
+    monkeypatch.setenv("API_URL", "http://127.0.0.1:8000/api/v1")
+    instalar(monkeypatch, "post", respuesta(codigo, {"error": {
+        "mensaje": "eco solo-prueba", "correlation_id": "id", "detalle": "solo-prueba",
+    }}))
+    with pytest.raises(cl.ErrorApi, match=mensaje) as error:
+        cl.solicitar("POST", "models/1/activate", modifica=True, credencial="solo-prueba")
+    assert "solo-prueba" not in str(error.value)
+    assert error.value.detalle is None and not error.value.no_confirmada
+
+
+def test_credencial_no_sale_por_http_remoto(monkeypatch):
+    with pytest.raises(cl.ErrorApi, match="HTTPS"):
+        cl.solicitar("POST", "frequency/executions", credencial="solo-prueba")
+
+
 def pagina(datos, p=1, t=50, total=None, **extra):
     total = len(datos) if total is None else total
     return {"datos": datos, "paginacion": {"pagina": p, "tamano": t, "total": total,

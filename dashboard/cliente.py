@@ -10,6 +10,7 @@ que las pruebas pueden reemplazarlos con ``monkeypatch``.
 from __future__ import annotations
 
 import os
+from urllib.parse import urlsplit
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -45,6 +46,8 @@ TRANSICIONES_ALERTA = {
 }
 
 TEXTO_CODIGO = {
+    401: "Introduce una credencial Bearer válida en el tablero.",
+    403: "Tu credencial no tiene el rol requerido para esta operación.",
     404: "El recurso solicitado no existe.",
     409: "La operación entra en conflicto con el estado actual.",
     422: "Los datos enviados no cumplen las validaciones.",
@@ -133,22 +136,54 @@ def _limpiar(params: Mapping[str, object] | None) -> dict:
     return salida
 
 
+def opciones_bearer(credencial: str) -> dict:
+    if os.environ.get("SOBUSA_DEMO_READ_ONLY") == "1":
+        raise ErrorApi("http", "La demostración solo permite consultas.", codigo_http=405)
+    if not credencial:
+        return {}
+    destino = urlsplit(url_api())
+    if destino.scheme != "https" and not (destino.scheme == "http" and
+                                           destino.hostname in {"localhost", "127.0.0.1", "::1"}):
+        raise ErrorApi("conexion", "Las credenciales requieren HTTPS o una API en loopback.")
+    if any(c.isspace() for c in credencial) or not credencial.isascii():
+        raise ErrorApi("http", TEXTO_CODIGO[401], codigo_http=401)
+    return {"headers": {"Authorization": f"Bearer {credencial}"}, "allow_redirects": False}
+
+
+def ocultar_credencial(texto, credencial: str):
+    return texto.replace(credencial, "[oculto]") if isinstance(texto, str) and credencial else texto
+
+
 def solicitar(metodo: str, ruta: str, *, params=None, json=None, timeout: float = TIEMPO_CONSULTA,
-              modifica: bool = False):
+              modifica: bool = False, credencial: str = ""):
     """Hace la solicitud y devuelve el JSON decodificado. Lanza ``ErrorApi`` ante cualquier fallo.
 
     ``modifica=True`` (POST, PATCH): un timeout, una conexión perdida o un 2xx ilegible se informan
     como **no confirmados**: la API pudo haber aplicado el cambio.
     """
+    solo_lectura = os.environ.get("SOBUSA_DEMO_READ_ONLY") == "1"
+    if solo_lectura and metodo != "GET":
+        raise ErrorApi("http", "La demostración solo permite consultas.", codigo_http=405)
     funcion = {"GET": requests.get, "POST": requests.post, "PATCH": requests.patch}[metodo]
     url = f"{url_api()}/{ruta.lstrip('/')}"
     argumentos = {"timeout": timeout}
+    if metodo in ("POST", "PATCH"):
+        argumentos.update(opciones_bearer(credencial))
     if params is not None:
         argumentos["params"] = _limpiar(params)
     if json is not None:
         argumentos["json"] = json
     try:
-        r = funcion(url, **argumentos)
+        if solo_lectura:
+            if url_api() != "http://127.0.0.1:18010/api/v1":
+                raise ErrorApi("conexion", "La demostración requiere la API local en el puerto 18010.")
+            with requests.Session() as sesion:
+                sesion.trust_env = False
+                r = sesion.get(url, allow_redirects=False, **argumentos)
+            if 300 <= r.status_code < 400:
+                raise ErrorApi("http", "La demostración no sigue redirecciones.", codigo_http=r.status_code)
+        else:
+            r = funcion(url, **argumentos)
     except requests.Timeout as e:            # antes que ConnectionError: ConnectTimeout hereda de ambos
         raise ErrorApi("timeout", "La API no respondió a tiempo."
                        + (" No se pudo confirmar si el cambio se aplicó; consulte el estado antes de "
@@ -162,8 +197,15 @@ def solicitar(metodo: str, ruta: str, *, params=None, json=None, timeout: float 
                        no_confirmada=modifica) from e
 
     codigo = r.status_code
+    if credencial and metodo != "GET" and 300 <= codigo < 400:
+        raise ErrorApi("http", "La API devolvió una redirección. No se volvió a enviar la credencial.",
+                       codigo_http=codigo, no_confirmada=modifica)
     if codigo >= 400:
         mensaje_api, cid, detalle = _error_de_cuerpo(r)
+        if credencial:
+            mensaje_api = ocultar_credencial(mensaje_api, credencial)
+            cid = ocultar_credencial(cid, credencial)
+            detalle = None
         base = TEXTO_CODIGO.get(codigo, "La API rechazó la solicitud.")
         # La API responde sus errores con el formato uniforme y revierte la transacción. Un 502/503/504
         # o un cuerpo que no es el de la API viene de un intermediario: no se sabe si el cambio se aplicó.

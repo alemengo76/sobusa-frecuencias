@@ -663,7 +663,7 @@ def test_normalizar_fin_de_linea():
     assert ex.normalizar_fin_de_linea("sin cambios") == "sin cambios"
 
 
-def test_xml_interno_del_xlsx_no_tiene_retornos_de_carro():
+def test_xml_interno_del_xlsx_no_tiene_retornos_de_carro(monkeypatch):
     import zipfile
     df = pd.DataFrame({"c\rol": ["\r=3", "a\r\nb"]}, dtype=object)
     contenido = ex.a_xlsx(df, {"clave": "\rvalor", "filtros": "x\r\ny"})
@@ -673,6 +673,14 @@ def test_xml_interno_del_xlsx_no_tiene_retornos_de_carro():
         for nombre in hojas:
             xml = z.read(nombre)
             assert b"\r" not in xml and b"&#13;" not in xml, nombre
+    # El XML base ya se interpreta con LF. El ajuste preserva valores y tipos.
+    from openpyxl import load_workbook
+    with monkeypatch.context() as m:
+        m.setattr(ex, "_normalizar_xml_xlsx", lambda datos: datos)
+        base = ex.a_xlsx(df, {"clave": "\rvalor", "filtros": "x\r\ny"})
+    hojas = lambda datos: [[[(celda.value, celda.data_type) for celda in fila] for fila in hoja]
+                            for hoja in load_workbook(io.BytesIO(datos)).worksheets]
+    assert hojas(contenido) == hojas(base)
 
 
 def test_csv_conserva_los_retornos_de_carro():

@@ -21,6 +21,16 @@ streamlit run dashboard/tablero.py
 Requiere la API en marcha. Funciona con Streamlit 1.30 o superior (usa `st.container(border=True)`,
 `st.date_input(value=None)` y `st.rerun`).
 
+Para la demostración de solo lectura, configure `SOBUSA_DEMO_READ_ONLY=1` y
+`API_URL=http://127.0.0.1:18010/api/v1`, y ejecute Streamlit en el puerto local 18501.
+Use una API de demostración que acepte solo GET y una conexión de base de solo lectura.
+El tablero oculta los formularios de escritura y su cliente rechaza mutaciones, redirecciones
+y conexiones a otras API en ese modo. Fuera de la demo, introduzca su credencial en el
+campo oculto de la barra lateral. La API permite despachar a operador y administrador.
+Recalcular recomendaciones, actualizar alertas y activar modelos requieren administrador.
+La credencial se envía solo al escribir, mediante HTTPS o HTTP en loopback, sin seguir
+redirecciones. El campo conserva el valor en la sesión activa del tablero.
+
 ## Módulos
 
 | Archivo | Qué hace | Usa Streamlit |
@@ -107,8 +117,8 @@ completo con un Streamlit falso estricto y solicitudes HTTP simuladas.
 
 - Se ofrecen los modelos `candidato` y `retirado`. No se ofrecen el `activo` ni los `rechazado`.
 - Reactivar un `retirado` es una reversión: exige una segunda confirmación.
-- El backend (`servicios.verificar_activable`) solo comprueba el artefacto de un GBM y aceptaría
-  activar un modelo rechazado. La restricción la pone el tablero.
+- El servicio rechaza los modelos rechazados con HTTP 409. El repositorio comprueba
+  el estado de nuevo bajo el bloqueo transaccional de activación.
 
 ### Errores
 

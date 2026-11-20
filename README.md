@@ -23,8 +23,9 @@ pip install -e ".[dev]"
 python -m scripts.cargar_extracto_local --base <carpeta del proyecto> --extracciones <carpetas raw>
 # 2. Lectura incremental (llena ai_frecuencias.demanda_franja y la cuarentena)
 DATABASE_URL_READ=... DATABASE_URL_WRITE=... python -m app.ingesta
-# 3. Calcular frecuencias de un día
+# 3. Calcular frecuencias con la credencial de operador configurada en la API
 curl -X POST localhost:8000/api/v1/frequency/executions -H "Content-Type: application/json" \
+     -H "Authorization: Bearer ${SOBUSA_OPERADOR_TOKEN:?Configure la credencial de operador}" \
      -d '{"dia": "2025-10-01", "idrutas": [2, 16, 21]}'
 # 4. Tablero (consume la API en API_URL; por defecto http://localhost:8000/api/v1)
 pip install -e ".[tablero]" && streamlit run dashboard/tablero.py
