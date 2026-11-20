@@ -7,11 +7,11 @@ from fastapi import APIRouter, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app import servicios
+from app import evaluacion_real, servicios
 from app.api.esquemas import (ActivacionModelo, CambioEstadoAlerta, ErrorRespuesta,
                               SolicitudFrecuencias, SolicitudPrediccion, SolicitudRecomendacion)
 from app.core.config import obtener_config
-from app.core.errores import ErrorAPI, NoEncontrado, cuerpo_error
+from app.core.errores import ErrorAPI, NoEncontrado, SolicitudInvalida, cuerpo_error
 from app.core.registro import configurar_logs, correlation_id
 from app.db import repositorio as repo
 from app.db.conexion import consultar_resultados, escribir
@@ -70,6 +70,7 @@ def _dia(d) -> datetime:
 
 Pagina = Query(1, ge=1, alias="pagina")
 Tamano = Query(50, ge=1, le=500)
+AgruparPor = Query(["idruta", "horizonte_min"])
 
 # Respuestas de error documentadas en OpenAPI (no cambian el comportamiento). Cada ruta declara
 # solo los códigos que su código puede producir; todas usan el formato uniforme ErrorRespuesta.
@@ -130,6 +131,53 @@ def listar_predicciones(idruta: int | None = None, horizonte_min: int | None = N
                                                         "execution_id": execution_id},
                                       desde, hasta, pagina_n, tamano)
     return pagina(filas, total, pagina_n, tamano)
+
+
+# ------------------------------------------------------------------ M1. predicción contra real
+
+def _validar_filtros_precision(idruta, horizonte_min):
+    if idruta is not None and idruta not in (2, 16, 21):
+        raise SolicitudInvalida("idruta debe ser 2, 16 o 21")
+    if horizonte_min is not None and horizonte_min not in (30, 60, 120):
+        raise SolicitudInvalida("horizonte_min debe ser 30, 60 o 120")
+
+
+@v1.get("/predictions/accuracy", tags=["predicciones"])
+def precision_predicciones(model_id: int | None = None, execution_id: uuid.UUID | None = None,
+                           idruta: int | None = None, horizonte_min: int | None = None,
+                           desde: datetime | None = None, hasta: datetime | None = None,
+                           agrupar_por: list[str] = AgruparPor):
+    """Métricas predicción-real (MAE, RMSE, WAPE, sMAPE, sesgo, cobertura del intervalo y MAE
+    relativo al ingenuo de 7 días) por modelo. Solo usa reales consolidados y medibles; el resto se
+    cuenta por estado. desde/hasta filtran franja_inicio [desde, hasta)."""
+    _validar_filtros_precision(idruta, horizonte_min)
+    invalidas = [g for g in agrupar_por if g not in evaluacion_real.cr.AGRUPACIONES]
+    if invalidas:
+        raise SolicitudInvalida(f"agrupar_por no soportado: {invalidas}",
+                                {"permitidos": list(evaluacion_real.cr.AGRUPACIONES)})
+    with consultar_resultados() as c:
+        r = evaluacion_real.evaluar(c, model_id, None if execution_id is None else str(execution_id),
+                                    idruta, horizonte_min, desde, hasta)
+    return evaluacion_real.resumen_metricas(r, tuple(dict.fromkeys(agrupar_por)))
+
+
+@v1.get("/predictions/accuracy/pairs", tags=["predicciones"])
+def pares_prediccion_real(model_id: int | None = None, execution_id: uuid.UUID | None = None,
+                          idruta: int | None = None, horizonte_min: int | None = None,
+                          desde: datetime | None = None, hasta: datetime | None = None,
+                          estado: str | None = None, pagina_n: int = Pagina,
+                          tamano: int = Tamano):
+    """Cada predicción con su real, estado y motivo de exclusión (paginado)."""
+    _validar_filtros_precision(idruta, horizonte_min)
+    if estado is not None and estado not in evaluacion_real.cr.ESTADOS:
+        raise SolicitudInvalida(f"estado no válido: {estado}",
+                                {"permitidos": list(evaluacion_real.cr.ESTADOS)})
+    with consultar_resultados() as c:
+        r = evaluacion_real.evaluar(c, model_id, None if execution_id is None else str(execution_id),
+                                    idruta, horizonte_min, desde, hasta)
+    filas, total = evaluacion_real.pares_json(r["pares"], estado, pagina_n, tamano)
+    return {**pagina(filas, total, pagina_n, tamano), "parametros": r["parametros"],
+            "huella": r["huella"]}
 
 
 # ------------------------------------------------------------------ 5-6. recomendaciones
