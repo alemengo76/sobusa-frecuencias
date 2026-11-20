@@ -1,4 +1,4 @@
-"""PATCH de gestión de alertas en dashboard/tablero.py (RF-011).
+"""PATCH de gestión de alertas en dashboard/tablero.py e invalidación de la exportación (RF-011, RF-017).
 
 El tablero dibuja su interfaz al nivel del módulo, así que cada prueba ejecuta el guion completo con
 runpy.run_path, con:
@@ -8,7 +8,7 @@ runpy.run_path, con:
   otra solicitud bloqueada en requests.Session.request;
 - respuestas requests.Response reales, para que raise_for_status() y json() lancen las excepciones
   verdaderas de requests.
-No usa red, base de datos, credenciales ni .env, y no modifica dashboard/tablero.py.
+No usa red, base de datos, credenciales ni .env, y no modifica dashboard/tablero.py ni exportacion.py.
 """
 import contextlib
 import json
@@ -18,15 +18,21 @@ import types
 from pathlib import Path
 
 import numpy  # noqa: F401  (se cargan antes de ejecutar el tablero)
+import openpyxl  # noqa: F401
 import pandas  # noqa: F401
 import pytest
 import requests
+
+from dashboard import exportacion as ex
 
 TABLERO = Path(__file__).resolve().parents[2] / "dashboard" / "tablero.py"
 API = "http://api-falsa.invalid/api/v1"
 AID = 1201                                    # primera alerta de la tabla: la que elige el formulario
 CUERPO_ESPERADO = {"estado": "reconocida", "usuario": "usuario-prueba", "comentario": None,
                    "usuario_asignado": None}
+CLAVE_EXPORTACION = "exportacion_alertas"
+CLAVE_AVISO = "exportacion_alertas_aviso"
+AVISO_PATCH = "Se intentó actualizar una alerta: se descartó la exportación preparada."
 TEXTO_EXITO = "La alerta se actualizó correctamente."
 TEXTO_NO_CONFIRMADA = ("No se pudo confirmar la actualización. "
                        "Revise el estado de la alerta antes de reintentar.")
@@ -71,12 +77,16 @@ class StFalso(types.ModuleType):
     def dataframe(self, datos, **kwargs): self._registrar("dataframe", datos)
     def line_chart(self, datos, **kwargs): self._registrar("line_chart", datos)
     def bar_chart(self, datos, **kwargs): self._registrar("bar_chart", datos)
+    def download_button(self, etiqueta, datos, **kwargs): self._registrar("download_button", etiqueta)
 
     # contenedores
     @property
     def sidebar(self): return contextlib.nullcontext()
     def tabs(self, nombres): return [contextlib.nullcontext() for _ in nombres]
     def form(self, clave, **kwargs): return contextlib.nullcontext()
+    def spinner(self, texto, **kwargs):
+        self._registrar("spinner", texto)
+        return contextlib.nullcontext()
 
     # widgets
     def selectbox(self, etiqueta, opciones, index=0, **kwargs):
@@ -115,7 +125,8 @@ class RespuestaConValueError(requests.Response):
 
 
 def alerta(i: int) -> dict:
-    """Alerta sintética con las columnas que devuelve la API."""
+    """Alerta sintética con todas las columnas de ex.ALERTAS.columnas, más las que la API también
+    devuelve y la lista blanca excluye."""
     return {"alert_id": i, "execution_id": "00000000-0000-0000-0000-000000000001", "codigo": "ALT-001",
             "severidad": "alta", "estado": "abierta", "idruta": 16,
             "franja_inicio": "2025-12-03T06:00:00-05:00", "horizonte_min": 60, "valor_observado": 120.5,
@@ -128,8 +139,8 @@ ALERTAS = [alerta(i) for i in (AID, 1200, 1199)]
 
 
 class GetFalso:
-    """GET de pantalla (predicciones, recomendaciones, alertas), con el contrato de la API:
-    {"datos": [...], "paginacion": {"pagina", "tamano", "total"}}, respetando pagina y tamano."""
+    """GET de pantalla (predicciones, recomendaciones, alertas) y de ex.traer_todo, con el contrato de la
+    API: {"datos": [...], "paginacion": {"pagina", "tamano", "total"}}, respetando pagina y tamano."""
 
     def __init__(self):
         self.llamadas = []
@@ -150,16 +161,21 @@ class GetFalso:
                   "paginacion": {"pagina": pagina, "tamano": tamano, "total": len(seleccion)}}
         return respuesta_json(200, cuerpo, url)
 
+    def paginas_exportadas(self):
+        return [p["pagina"] for ruta, p, _ in self.llamadas if ruta == "alerts" and "pagina" in p]
+
 
 class PatchFalso:
-    """requests.patch simulado: registra cada llamada y después devuelve la respuesta indicada o lanza
-    la excepción indicada."""
+    """requests.patch simulado: registra cada llamada junto con el estado de la exportación EN ESE
+    INSTANTE, y después devuelve la respuesta indicada o lanza la excepción indicada."""
 
     def __init__(self, efecto, estado: dict):
         self.efecto, self.estado, self.llamadas = efecto, estado, []
 
     def __call__(self, url, json=None, timeout=None, **otros):
-        self.llamadas.append({"url": url, "json": json, "timeout": timeout, "otros": otros})
+        self.llamadas.append({"url": url, "json": json, "timeout": timeout, "otros": otros,
+                              "exportacion_presente": CLAVE_EXPORTACION in self.estado,
+                              "aviso_en_ese_momento": self.estado.get(CLAVE_AVISO)})
         if isinstance(self.efecto, BaseException):
             raise self.efecto
         return self.efecto()
@@ -220,6 +236,11 @@ def comprobar_error_unico(st: StFalso) -> str:
 
 
 # ------------------------------------------------------------------------- datos de prueba
+
+def test_las_alertas_sinteticas_tienen_todas_las_columnas_exportables():
+    for a in ALERTAS:
+        assert set(ex.ALERTAS.columnas) <= set(a)
+
 
 def test_el_streamlit_falso_rechaza_metodos_no_simulados():
     with pytest.raises(AttributeError, match="no está simulado"):
@@ -330,3 +351,30 @@ def test_value_error_al_procesar_la_respuesta(monkeypatch):
     assert comprobar_error_unico(st) == "Ocurrió un error al procesar la respuesta de la API."
     comprobar_sin_exito(st)
 
+
+# ------------------------------------------------------------------------- invalidación de la exportación
+
+@pytest.mark.parametrize("efecto", [
+    lambda: respuesta_json(200, {"alert_id": AID, "estado": "reconocida"}),
+    requests.ConnectionError("caída"),
+    lambda: respuesta_json(409, {"error": {"mensaje": "m", "correlation_id": "c"}}),
+], ids=["exito", "conexion", "http_409"])
+def test_la_exportacion_preparada_se_invalida_antes_del_patch(monkeypatch, efecto):
+    estado = {}
+
+    get = GetFalso()
+    st_preparacion = ejecutar(monkeypatch, estado, pulsados={"Preparar exportación"}, get=get)
+    assert CLAVE_EXPORTACION in estado, st_preparacion.de_tipo("error")
+    assert get.paginas_exportadas() == [1, 1]                 # página 1 y su verificación de cierre
+    assert estado[CLAVE_EXPORTACION]["total"] == len(ALERTAS)
+
+    st, patch = guardar(monkeypatch, efecto, estado)
+
+    comprobar_solicitud(patch)
+    # orden temporal: al llamar a requests.patch la exportación ya se había descartado y el aviso existía
+    assert patch.llamadas[0]["exportacion_presente"] is False
+    assert patch.llamadas[0]["aviso_en_ese_momento"] == AVISO_PATCH
+    assert CLAVE_EXPORTACION not in estado
+    assert estado[CLAVE_AVISO] == AVISO_PATCH
+    assert st.de_tipo("download_button") == []
+    assert AVISO_PATCH in st.de_tipo("info")
