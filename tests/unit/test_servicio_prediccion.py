@@ -72,6 +72,11 @@ def repo_falso(entorno, activo, respaldo=BASE, rutas_sin_datos=()):
         yield
 
 
+def guardadas(pred):
+    """Como si vinieran de predicciones_de_ejecucion: cada fila con su prediction_id."""
+    return pred.reset_index(drop=True).assign(prediction_id=lambda d: d.index + 1)
+
+
 def _validar(pred):
     contrato.validar_predicciones(pred.assign(franja_inicio=pd.to_datetime(pred.franja_inicio)))
     assert np.isfinite(pred.demanda_pred).all() and (pred.demanda_pred >= 0).all()
@@ -137,11 +142,13 @@ def test_ejecucion_guarda_filas_con_el_modelo_que_las_produjo(entorno):
     with repo_falso(entorno, entorno["gbm"], rutas_sin_datos=(2,)), \
          patch.object(servicios, "escribir", escribir), \
          patch.object(servicios.repo, "crear_ejecucion", return_value="e1"), \
+         patch.object(servicios.repo, "reservar_conjunto", return_value=True), \
+         patch.object(servicios.repo, "insertar_predicciones", side_effect=lambda c, e, df: len(df)) as insertar, \
          patch.object(servicios.repo, "cerrar_ejecucion") as cerrar:
         r = servicios.ejecutar_predicciones(RUTAS, DIA, H, "cid")
     assert r["estado"] == "exitosa" and r["respaldo"] and r["predicciones"] > 0
-    filas = c.execute.call_args.args[1]
-    por_ruta = pd.DataFrame(filas).groupby("idruta").model_id.unique().apply(list).to_dict()
+    filas = insertar.call_args.args[2]          # las filas normalizadas que se guardan
+    por_ruta = filas.groupby("idruta").model_id.unique().apply(list).to_dict()
     assert por_ruta == {2: [1], 16: [7], 21: [7]}
     resumen = cerrar.call_args.args[3]
     assert resumen["modelo_respaldo"] == 1 and resumen["filas_por_modelo"][7] > 0
@@ -165,7 +172,7 @@ def test_recomendaciones_con_factores_medidos(entorno):
     with patch.object(servicios.repo, "parametros_vigentes", return_value=filas_param_v2()), \
          patch.object(servicios, "_frecuencia_actual", return_value=None), \
          patch.object(servicios.repo, "insertar_recomendaciones"):
-        rec = servicios.calcular_recomendaciones(c, "e", pd.concat([pred, pred_sab]), "puntual")
+        rec = servicios.calcular_recomendaciones(c, "e", guardadas(pd.concat([pred, pred_sab])), "puntual")
     rec["dia"] = pd.to_datetime(rec.franja_inicio).dt.normalize()
     tipo_dia_d = "laboral" if pd.Timestamp(DIA).dayofweek < 5 else "sabado"
     from tests.unit.test_parametros import ESPERADO
@@ -183,7 +190,7 @@ def test_alertas_de_frecuencia_solo_60_min_con_umbral_de_la_base(entorno):
     with patch.object(servicios.repo, "parametros_vigentes", return_value=filas_param_v2()), \
          patch.object(servicios, "_frecuencia_actual", return_value=None), \
          patch.object(servicios.repo, "insertar_recomendaciones"):
-        rec = servicios.calcular_recomendaciones(MagicMock(), "e", pred, "puntual")
+        rec = servicios.calcular_recomendaciones(MagicMock(), "e", guardadas(pred), "puntual")
     assert set(rec.horizonte_min) == {30, 60, 120}
     rec = rec.assign(buses_hora_actual=(rec.buses_hora_recomendado - 1).clip(lower=1))   # déficit de 1 bus/h
     with patch.object(servicios.repo, "umbrales_vigentes", return_value=({"ALT-003": 2.0}, {"ALT-003": 2})), \
