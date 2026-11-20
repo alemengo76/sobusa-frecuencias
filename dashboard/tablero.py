@@ -53,7 +53,11 @@ def _leer(ruta: str, params: dict, columna_id: str) -> list[dict] | None:
 
 
 def _ejecucion(eid: str) -> dict | None:
-    """GET /frequency/executions/{id}; None (con aviso) si no se puede consultar."""
+    """GET /frequency/executions/{id}; None (con aviso) si no se puede consultar. Con un id que no es
+    un UUID no se hace la consulta."""
+    if xp.id_ejecucion(eid) is None:
+        st.warning(f"Identificador de ejecución no válido ({eid!r}); no se consulta la API.")
+        return None
     try:
         return _get(f"frequency/executions/{eid}", {})
     except (requests.RequestException, ValueError) as e:
@@ -61,8 +65,15 @@ def _ejecucion(eid: str) -> dict | None:
         return None
 
 
-def _elegir_ejecucion(grupo, etiqueta: str, clave: str) -> str:
-    """Una sola ejecución: la más reciente por defecto, o la que elija el usuario si hay varias."""
+def _elegir_ejecucion(grupo, etiqueta: str, clave: str) -> str | None:
+    """Una sola ejecución: la más reciente por defecto, o la que elija el usuario si hay varias.
+    None (con aviso) si ninguna fila tiene execution_id válido."""
+    if grupo.excluidas:
+        st.warning(f"Se excluyeron {grupo.excluidas} filas sin execution_id válido (nulo, ausente, "
+                   "vacío o no UUID): no pertenecen a ninguna ejecución y no se muestran.")
+    if not grupo.lista:
+        st.warning("Ninguna fila tiene un execution_id válido: no hay ejecución que mostrar.")
+        return None
     if not grupo.por_fecha:
         st.warning(f"No se pudieron ordenar las ejecuciones por fecha ({grupo.motivo}); se listan por "
                    "identificador.")
@@ -84,13 +95,30 @@ def _sin_otros_filtros(filas: list[dict]) -> list[dict]:
             and str(f.get("horizonte_min")) == str(horizonte)]
 
 
+def _hay_duplicadas(filas: list[dict], campos: tuple, columnas: tuple, tipo: str) -> bool:
+    """True (con aviso y la tabla de filas afectadas) si dos filas ocupan la misma franja."""
+    duplicadas = xp.franjas_duplicadas(filas, campos, columnas)
+    if not duplicadas:
+        return False
+    st.warning(f"{len(duplicadas)} {tipo} comparten franja (mismo instante) en esta selección. No se "
+               "grafican ni se explican, y no se elige ninguna; revise las filas afectadas:")
+    st.dataframe(pd.DataFrame(duplicadas, columns=list(columnas)))
+    return True
+
+
 def _por_franja(df: pd.DataFrame) -> pd.DataFrame | None:
-    """df ordenado e indexado por franja_inicio, o None (con aviso) si las fechas no son homogéneas."""
-    try:
-        franjas = pd.to_datetime(df.franja_inicio)
-    except (TypeError, ValueError):
+    """df ordenado e indexado por franja_inicio, o None (con aviso) si las fechas no son homogéneas.
+
+    Todas con zona: se expresan en hora de Bogotá (mismo instante, aunque lleguen con desplazamientos
+    distintos). Ninguna con zona: se dejan como llegaron. Mezcla o ilegibles: no se grafican."""
+    instantes = [xp.instante(v) for v in df.franja_inicio]
+    if any(t is None for t in instantes) or len({xp.con_zona(t) for t in instantes}) > 1:
         st.warning("Las franjas mezclan fechas con y sin zona horaria o no son legibles; no se grafican.")
         return None
+    if instantes and xp.con_zona(instantes[0]):
+        franjas = pd.DatetimeIndex([t.tz_convert(xp.ZONA_DIA) for t in instantes])
+    else:
+        franjas = pd.DatetimeIndex(instantes)
     return df.assign(franja_inicio=franjas).sort_values("franja_inicio").set_index("franja_inicio")
 
 
@@ -104,16 +132,20 @@ def mostrar_predicciones(filtros: dict) -> None:
         st.info(f"Sin predicciones para la ruta {NOMBRES[idruta]}, horizonte {horizonte} min, "
                 f"día {dia_txt}.")
         return
-    eid = _elegir_ejecucion(xp.separar_ejecuciones(filas), "Ejecución de predicción",
-                            "ejecucion_prediccion")
+    grupo = xp.separar_ejecuciones(filas)
+    eid = _elegir_ejecucion(grupo, "Ejecución de predicción", "ejecucion_prediccion")
+    if eid is None:
+        return
     de_eid = xp.de_ejecucion(filas, eid)
-    otras_ejecuciones, filas = len(filas) - len(de_eid), de_eid
+    otras_ejecuciones, filas = len(filas) - len(de_eid) - grupo.excluidas, de_eid
 
     ocultas: list[dict] = []
     modelos = xp.modelos(filas)
     if len(modelos) > 1:
-        st.warning("Esta ejecución tiene filas de más de un modelo; se muestra un modelo a la vez.")
-        etiquetas = {mid: f"{ver} (model_id {mid}, {n} filas)" for mid, ver, n in modelos}
+        st.warning("Esta ejecución tiene filas de más de un modelo (model_id y versión); se muestra "
+                   "un modelo a la vez.")
+        # La clave es la pareja (model_id, model_version): un mismo id puede tener varias versiones
+        etiquetas = {(mid, ver): f"{ver} (model_id {mid}, {n} filas)" for (mid, ver), n in modelos}
         modelo = st.selectbox("Modelo", list(etiquetas), format_func=etiquetas.get,
                               key="modelo_prediccion")
         ocultas = xp.ocultas_por_modelo(filas, modelo)
@@ -123,6 +155,9 @@ def mostrar_predicciones(filtros: dict) -> None:
     if ocultas:
         st.warning(f"{len(ocultas)} franjas de esta ejecución quedan fuera por ser de otro modelo:")
         st.dataframe(pd.DataFrame(ocultas))
+    if _hay_duplicadas(filas, xp.CLAVE_FRANJA_PREDICCION, xp.COLUMNAS_DUPLICADO_PREDICCION,
+                       "predicciones"):
+        return                    # sin gráfico ni más consultas a la API
 
     ejecucion = _ejecucion(eid)
     respaldo = xp.respaldo_registrado(ejecucion)
@@ -165,7 +200,8 @@ def _predicciones_asociadas(eid: str, filtros: dict) -> tuple[str | None, list[d
         return None, [], "no se pudo consultar la ejecución de recomendaciones"
     eid_pred = xp.ejecucion_prediccion_asociada(ejecucion)
     if eid_pred is None:
-        st.warning(f"La ejecución {eid} no indica de qué ejecución de predicciones salió.")
+        st.warning(f"La ejecución {eid} no indica de qué ejecución de predicciones salió (o el "
+                   "identificador no es válido).")
         return None, [], "la ejecución de recomendaciones no indica su ejecución de predicciones"
     leidas = _leer("predictions", {**filtros, "execution_id": eid_pred}, "prediction_id")
     if leidas is None:
@@ -192,10 +228,18 @@ def mostrar_recomendaciones(filtros: dict) -> None:
         st.info(f"Sin recomendaciones para la ruta {NOMBRES[idruta]}, horizonte {horizonte} min, "
                 f"día {dia_txt}.")
         return
-    eid = _elegir_ejecucion(xp.separar_ejecuciones(filas), "Ejecución de recomendación",
-                            "ejecucion_recomendacion")
+    grupo = xp.separar_ejecuciones(filas)
+    eid = _elegir_ejecucion(grupo, "Ejecución de recomendación", "ejecucion_recomendacion")
+    if eid is None:
+        return
     de_eid = xp.de_ejecucion(filas, eid)
-    otras_ejecuciones, filas = len(filas) - len(de_eid), de_eid
+    otras_ejecuciones, filas = len(filas) - len(de_eid) - grupo.excluidas, de_eid
+    if _hay_duplicadas(filas, xp.CLAVE_FRANJA_RECOMENDACION, xp.COLUMNAS_DUPLICADO_RECOMENDACION,
+                       "recomendaciones"):
+        st.caption(f"Ejecución de recomendaciones: {eid} · descartadas: {otras_ejecuciones} filas de "
+                   "otras ejecuciones · ejecución de predicciones asociada: no consultada (datos "
+                   "ambiguos).")
+        return                    # sin gráfico, sin explicación y sin consultar la ejecución
     eid_pred, predicciones, motivo = _predicciones_asociadas(eid, filtros)
     st.caption(f"Ejecución de recomendaciones: {eid} · {len(filas)} franjas mostradas · descartadas: "
                f"{otras_ejecuciones} filas de otras ejecuciones · ejecución de predicciones asociada: "
@@ -211,12 +255,20 @@ def mostrar_recomendaciones(filtros: dict) -> None:
                                                "motivo_no_viable"]])
 
     st.subheader("Explicación de la recomendación")
-    por_franja = {str(f["franja_inicio"]): f for f in sorted(filas, key=lambda f: str(f["franja_inicio"]))}
+    # Franjas por instante normalizado (nunca por texto); los duplicados ya se descartaron arriba
+    claves = [(xp.clave_instante(f.get("franja_inicio")), f) for f in filas]
+    if any(k is None for k, _ in claves):
+        st.warning("Hay franjas que no son fechas legibles; no se explica para no elegir una "
+                   "arbitrariamente.")
+        return
+    por_franja = {k: f for k, f in sorted(claves, key=lambda kf: kf[0])}
     if len(por_franja) != len(filas):
         st.warning("La ejecución tiene más de una recomendación para la misma franja; no se explica "
                    "para no elegir una arbitrariamente.")
         return
-    franja = st.selectbox("Franja a explicar", list(por_franja), key="franja_explicada")
+    etiquetas = {k: str(f.get("franja_inicio")) for k, f in por_franja.items()}
+    franja = st.selectbox("Franja a explicar", list(por_franja), key="franja_explicada",
+                          format_func=etiquetas.get)
     rec = por_franja[franja]
     asociacion = xp.prediccion_para(rec, predicciones) if motivo is None else xp.Asociacion(None, motivo)
     if asociacion.prediccion is not None:
@@ -235,6 +287,7 @@ def mostrar_recomendaciones(filtros: dict) -> None:
     st.caption("No disponibles en la API: " + " ".join(exp["no_disponibles"]))
     st.caption("Las variables son las de la regla de recomendación. La API no ofrece explicación "
                "local de las variables del modelo de demanda.")
+    st.caption(xp.ALCANCE_RF015)
 
 
 with st.sidebar:

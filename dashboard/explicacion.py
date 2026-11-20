@@ -11,16 +11,28 @@ Principios
   muestra un solo grupo.
 * Lo que la API no expone se declara como no disponible; no se infiere.
 * Fechas: nunca se compara una fecha con zona horaria con otra sin zona (no hay conversión implícita
-  que pueda desplazar una franja).
+  que pueda desplazar una franja). El día se pide a la API en hora de Bogotá con su desplazamiento.
+* Un modelo se identifica por la pareja (model_id, model_version), nunca solo por model_id.
+* Una fila sin execution_id válido no pertenece a ninguna ejecución: se excluye y se cuenta.
+* Si dos filas ocupan la misma franja del gráfico, no se grafica ni se elige una: se muestran ambas.
+
+Alcance de RF-015
+-----------------
+Se explica la regla operativa de frecuencias (regla aplicada, variables de la fórmula y valores
+guardados como evidencia cuantitativa). NO se ofrece explicación local de las variables que influyeron
+en cada pronóstico: la API no la expone. Es una limitación de cumplimiento de RF-015 pendiente; aquí
+no se simula ni se infiere importancia de variables.
 """
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 import pandas as pd
 
+ZONA_DIA = "America/Bogota"         # la API trabaja en esta zona (app/db/conexion.py: OPCIONES)
 TAMANO_PAGINA = 500                 # igual al le=500 de la API (app/api/main.py: Tamano)
 MAX_FILAS = 5_000                   # por consulta de un día, una ruta y un horizonte
 
@@ -58,6 +70,11 @@ DESCRIPCION_INTERVALO = {
     SIN_DATO: "Falta alguno de los tres valores o no es numérico.",
 }
 
+ALCANCE_RF015 = (
+    "Alcance de RF-015: se explica la regla operativa de frecuencias con los valores guardados como "
+    "evidencia cuantitativa. La explicación local de las variables que influyeron en cada pronóstico "
+    "no está disponible en la API: es una limitación pendiente de RF-015.")
+
 LIMITACIONES_PREDICCION = (
     "nivel_intervalo es el nivel nominal guardado con la predicción. Según el código de la API, el "
     "intervalo sale de errores históricos del modelo o de una banda fija provisional; no es un "
@@ -87,11 +104,15 @@ class ErrorLectura(Exception):
 # ------------------------------------------------------------------------------------- lectura
 
 def rango_dia(dia) -> tuple[str, str]:
-    """(desde, hasta) del día como texto ISO sin zona, el mismo formato con el que la API guarda la
-    franja. hasta es exclusivo (la API filtra franja_inicio < hasta)."""
-    inicio = pd.Timestamp(dia).normalize()
-    fin = inicio + pd.Timedelta(days=1)
-    return inicio.strftime("%Y-%m-%dT%H:%M:%S"), fin.strftime("%Y-%m-%dT%H:%M:%S")
+    """(desde, hasta) del día calendario de Bogotá como ISO-8601 con desplazamiento (-05:00).
+
+    desde es inclusivo y hasta exclusivo, como filtra la API (franja_inicio >= desde y < hasta). Un
+    ``dia`` con zona horaria se lleva primero a Bogotá; uno sin zona se toma como fecha de Bogotá."""
+    t = pd.Timestamp(dia)
+    fecha = (t.tz_convert(ZONA_DIA) if t.tzinfo is not None else t).date()
+    inicio = pd.Timestamp(fecha).tz_localize(ZONA_DIA)
+    fin = pd.Timestamp(fecha + pd.Timedelta(days=1)).tz_localize(ZONA_DIA)
+    return inicio.isoformat(), fin.isoformat()
 
 
 def _pagina(get, ruta: str, params: Mapping, pagina: int, tamano: int,
@@ -188,16 +209,40 @@ class Ejecuciones:
     lista: list[Ejecucion]
     por_fecha: bool                    # False: no se pudo ordenar por generated_at (ver motivo)
     motivo: str | None = None
+    excluidas: int = 0                 # filas sin execution_id válido (no están en ninguna ejecución)
+
+
+def id_ejecucion(valor) -> str | None:
+    """execution_id utilizable, o None si es nulo, vacío o no es un UUID.
+
+    La API lo guarda como ``uuid NOT NULL`` y ``/frequency/executions/{id}`` exige un UUID, así que
+    cualquier otro valor no identifica una ejecución. Se devuelve el texto recibido, sin espacios."""
+    if valor is None or isinstance(valor, bool):
+        return None
+    texto = str(valor).strip()
+    if not texto:
+        return None
+    try:
+        uuid.UUID(texto)
+    except ValueError:
+        return None
+    return texto
 
 
 def separar_ejecuciones(filas: list[Mapping]) -> Ejecuciones:
     """Ejecuciones presentes en ``filas``, de la más reciente a la más antigua por generated_at.
 
-    Si algún generated_at falta, no es legible o se mezclan valores con y sin zona horaria, no se
-    ordena por fecha (orden por identificador) y se informa el motivo."""
+    Las filas sin execution_id válido (nulo, ausente, vacío o no UUID) no se agrupan: se cuentan en
+    ``excluidas``. Si algún generated_at falta, no es legible o se mezclan valores con y sin zona
+    horaria, no se ordena por fecha (orden por identificador) y se informa el motivo."""
     grupos: dict[str, list[Mapping]] = {}
+    excluidas = 0
     for f in filas:
-        grupos.setdefault(str(f.get("execution_id")), []).append(f)
+        eid = id_ejecucion(f.get("execution_id"))
+        if eid is None:
+            excluidas += 1
+        else:
+            grupos.setdefault(eid, []).append(f)
     marcas = {eid: [(instante(f.get("generated_at")), f.get("generated_at")) for f in fs]
               for eid, fs in grupos.items()}
     todas = [t for ms in marcas.values() for t, _ in ms]
@@ -216,11 +261,14 @@ def separar_ejecuciones(filas: list[Mapping]) -> Ejecuciones:
         lista.sort(key=lambda e: (ultima[e.execution_id], e.execution_id), reverse=True)
     else:
         lista.sort(key=lambda e: e.execution_id)
-    return Ejecuciones(lista, motivo is None, motivo)
+    return Ejecuciones(lista, motivo is None, motivo, excluidas)
 
 
 def de_ejecucion(filas: list[Mapping], execution_id: str) -> list[Mapping]:
-    return [f for f in filas if str(f.get("execution_id")) == execution_id]
+    """Filas de una ejecución válida. Con un id inválido no devuelve nada (nunca agrupa nulos)."""
+    if id_ejecucion(execution_id) is None:
+        return []
+    return [f for f in filas if id_ejecucion(f.get("execution_id")) == execution_id]
 
 
 def fuera_de_filtro(filas: list[Mapping], idruta: int, horizonte_min: int) -> int:
@@ -229,24 +277,66 @@ def fuera_de_filtro(filas: list[Mapping], idruta: int, horizonte_min: int) -> in
                if str(f.get("idruta")) != str(idruta) or str(f.get("horizonte_min")) != str(horizonte_min))
 
 
-def modelos(filas: list[Mapping]) -> list[tuple[str, str, int]]:
-    """(model_id, model_version, filas) por modelo: primero el de más filas; a igualdad, por model_id."""
+def clave_modelo(fila: Mapping) -> tuple[str, str]:
+    """Identidad de un modelo: (model_id, model_version). model_id solo no basta."""
+    return str(fila.get("model_id")), str(fila.get("model_version"))
+
+
+def modelos(filas: list[Mapping]) -> list[tuple[tuple[str, str], int]]:
+    """((model_id, model_version), filas) por modelo: primero el de más filas; a igualdad, por clave."""
     conteo: dict[tuple[str, str], int] = {}
     for f in filas:
-        clave = (str(f.get("model_id")), str(f.get("model_version")))
+        clave = clave_modelo(f)
         conteo[clave] = conteo.get(clave, 0) + 1
-    return sorted(((mid, ver, n) for (mid, ver), n in conteo.items()), key=lambda t: (-t[2], t[0]))
+    return sorted(conteo.items(), key=lambda t: (-t[1], t[0]))
 
 
-def de_modelo(filas: list[Mapping], model_id: str) -> list[Mapping]:
-    return [f for f in filas if str(f.get("model_id")) == model_id]
+def de_modelo(filas: list[Mapping], modelo: tuple[str, str]) -> list[Mapping]:
+    return [f for f in filas if clave_modelo(f) == tuple(modelo)]
 
 
-def ocultas_por_modelo(filas: list[Mapping], model_id: str) -> list[dict]:
-    """Franjas de otros modelos que quedan fuera al mostrar ``model_id`` (valores tal como llegaron)."""
+def ocultas_por_modelo(filas: list[Mapping], modelo: tuple[str, str]) -> list[dict]:
+    """Franjas de otros modelos (otra pareja id-versión) que quedan fuera al mostrar ``modelo``."""
     return [{"franja_inicio": f.get("franja_inicio"), "model_id": f.get("model_id"),
              "model_version": f.get("model_version")}
-            for f in filas if str(f.get("model_id")) != model_id]
+            for f in filas if clave_modelo(f) != tuple(modelo)]
+
+
+# Franja del gráfico: el eje es solo el tiempo, así que dos filas de la misma ruta, horizonte (y, en
+# predicciones, modelo) en el mismo instante se superponen aunque difieran en segmento_id o
+# data_cutoff. Esas columnas no forman parte de la clave: se muestran para explicar el conflicto.
+CLAVE_FRANJA_PREDICCION = ("idruta", "horizonte_min", "model_id", "model_version")
+CLAVE_FRANJA_RECOMENDACION = ("idruta", "horizonte_min")
+COLUMNAS_DUPLICADO_PREDICCION = ("prediction_id", "execution_id", "franja_inicio", "idruta",
+                                 "horizonte_min", "segmento_id", "data_cutoff", "model_id",
+                                 "model_version")
+COLUMNAS_DUPLICADO_RECOMENDACION = ("recommendation_id", "execution_id", "franja_inicio", "idruta",
+                                    "horizonte_min", "segmento_id", "base_demanda", "parametros_version")
+
+
+def clave_instante(valor) -> tuple | None:
+    """Clave comparable de una fecha, normalizada antes de comparar.
+
+    Con zona: el instante expresado en America/Bogota (06:00-05:00 = 11:00+00:00). Sin zona: el valor
+    tal cual (no se le asigna una zona). Una fecha con zona y otra sin zona nunca tienen la misma
+    clave. None si no es legible."""
+    t = instante(valor)
+    if t is None:
+        return None
+    return ("con_zona", t.tz_convert(ZONA_DIA)) if con_zona(t) else ("sin_zona", t)
+
+
+def franjas_duplicadas(filas: list[Mapping], campos: tuple[str, ...],
+                       columnas: tuple[str, ...]) -> list[dict]:
+    """Todas las filas (sin elegir ninguna) que comparten ``campos`` y el instante de franja_inicio,
+    con ``columnas`` tal como llegaron. Las franjas ilegibles no se agrupan (el gráfico ya las
+    rechaza)."""
+    grupos: dict[tuple, list[Mapping]] = {}
+    for f in filas:
+        k = clave_instante(f.get("franja_inicio"))
+        if k is not None:
+            grupos.setdefault((tuple(str(f.get(c)) for c in campos), k), []).append(f)
+    return [{c: f.get(c) for c in columnas} for fs in grupos.values() if len(fs) > 1 for f in fs]
 
 
 def valores_unicos(filas: list[Mapping], columna: str) -> list:
@@ -324,7 +414,7 @@ def ejecucion_prediccion_asociada(ejecucion: Mapping | None) -> str | None:
     for valor in (resumen.get("execution_id_prediccion"), parametros.get("execution_id_prediccion"),
                   parametros.get("prediccion")):
         if valor:
-            return str(valor)
+            return id_ejecucion(valor)      # el primero informado decide; inválido -> None
     return None
 
 

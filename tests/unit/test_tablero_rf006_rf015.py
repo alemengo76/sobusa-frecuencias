@@ -6,8 +6,8 @@ Dos niveles:
   tablero) y una API falsa que respeta los filtros, el orden y la paginación de la API real.
 No usa red, base de datos, credenciales ni .env.
 
-Supuesto de la API falsa: desde/hasta sin zona se interpretan en America/Bogota para filas con zona
-(no verificado contra la base real; ver el informe de la rama).
+La API falsa compara instantes, como PostgreSQL al comparar timestamptz: un valor sin zona se toma
+en America/Bogota, la zona de sesión de la API (app/db/conexion.py). No verificado contra la base real.
 """
 import contextlib
 import json
@@ -223,9 +223,29 @@ def get_de(api):
 
 # ============================================================================ paginación
 
-def test_rango_dia_es_el_dia_completo_con_hasta_exclusivo():
-    assert xp.rango_dia(pd.Timestamp("2025-10-01 13:45")) == ("2025-10-01T00:00:00",
-                                                              "2025-10-02T00:00:00")
+def test_rango_dia_en_bogota_con_desplazamiento_y_hasta_exclusivo():
+    assert xp.rango_dia(pd.Timestamp("2026-11-19 13:45")) == ("2026-11-19T00:00:00-05:00",
+                                                              "2026-11-20T00:00:00-05:00")
+    import datetime as dt
+    assert xp.rango_dia(dt.date(2025, 10, 1)) == ("2025-10-01T00:00:00-05:00",
+                                                  "2025-10-02T00:00:00-05:00")
+
+
+def test_rango_dia_cubre_exactamente_el_dia_de_bogota():
+    desde, hasta = (pd.Timestamp(x) for x in xp.rango_dia(pd.Timestamp("2025-12-31")))
+    assert desde.utcoffset() == hasta.utcoffset() == pd.Timedelta(hours=-5)
+    assert hasta - desde == pd.Timedelta(days=1)
+    assert desde.tz_convert("America/Bogota").strftime("%Y-%m-%d %H:%M") == "2025-12-31 00:00"
+    assert hasta.tz_convert("America/Bogota").strftime("%Y-%m-%d %H:%M") == "2026-01-01 00:00"
+    bogota = pd.Timestamp("2025-12-31 23:59:59.999999", tz="America/Bogota")
+    assert desde <= pd.Timestamp("2025-12-31 00:00", tz="America/Bogota") and bogota < hasta
+    assert not pd.Timestamp("2025-12-30 23:59:59", tz="America/Bogota") >= desde
+    assert not pd.Timestamp("2026-01-01 00:00", tz="America/Bogota") < hasta
+
+
+def test_rango_dia_con_zona_toma_la_fecha_de_bogota():
+    # 2025-10-02 03:00 UTC es todavía 1 de octubre (22:00) en Bogotá
+    assert xp.rango_dia(pd.Timestamp("2025-10-02T03:00:00+00:00"))[0] == "2025-10-01T00:00:00-05:00"
 
 
 def test_leer_paginas_completa_todas_las_paginas_y_verifica_la_primera():
@@ -437,7 +457,7 @@ def test_intervalos_colapsados_en_distintos_modelos(monkeypatch):
         prediccion(3, F3, model_id=1, version="baseline_dh_v1", pred=0, li=0, ls=0),
         prediccion(4, "2025-10-01T06:45:00-05:00", model_id=1, version="baseline_dh_v1",
                    pred=100, li=75, ls=130)])
-    for modelo, colapsadas, banda in (("3", 2, None), ("1", 1, 1)):
+    for modelo, colapsadas, banda in ((("3", "gbm"), 2, None), (("1", "baseline_dh_v1"), 1, 1)):
         st = ejecutar(monkeypatch, api, valores={"Modelo": modelo})
         t = tabla_intervalos(st)
         assert t["Colapsado"] == colapsadas
@@ -448,9 +468,11 @@ def test_intervalos_colapsados_en_distintos_modelos(monkeypatch):
 # ======================================================================= explicacion (unidad)
 
 def test_ejecucion_prediccion_asociada_segun_el_tipo_de_ejecucion():
-    assert xp.ejecucion_prediccion_asociada(ejecucion_frecuencias("p1")) == "p1"
+    assert xp.ejecucion_prediccion_asociada(ejecucion_frecuencias(E_PRED_A)) == E_PRED_A
     assert xp.ejecucion_prediccion_asociada(
-        {"tipo": "recomendacion", "parametros": {"execution_id_prediccion": "p2"}, "resumen": {}}) == "p2"
+        {"tipo": "recomendacion", "parametros": {"execution_id_prediccion": E_PRED_B},
+         "resumen": {}}) == E_PRED_B
+    assert xp.ejecucion_prediccion_asociada(ejecucion_frecuencias("p1")) is None        # no es UUID
     assert xp.ejecucion_prediccion_asociada({"tipo": "frecuencias", "resumen": {}}) is None
     assert xp.ejecucion_prediccion_asociada(None) is None
 
@@ -525,7 +547,8 @@ def test_predicciones_solo_del_dia_y_de_una_ejecucion_con_descartes_informados(m
     ])
     st = ejecutar(monkeypatch, api)
     pedido = api.de("predictions")[0]
-    assert pedido["desde"] == "2025-10-01T00:00:00" and pedido["hasta"] == "2025-10-02T00:00:00"
+    assert pedido["desde"] == "2025-10-01T00:00:00-05:00"
+    assert pedido["hasta"] == "2025-10-02T00:00:00-05:00"
     assert pedido["idruta"] == 16 and pedido["horizonte_min"] == 60
     assert st.opciones["Ejecución de predicción"][0].startswith(E_PRED_B)       # la más reciente
     assert grafico(st)["demanda_pred"].tolist() == [555.0]
@@ -562,7 +585,7 @@ def test_varios_modelos_identifican_franjas_ocultas_y_respaldo(monkeypatch):
     api = ApiFalsa(predicciones=[prediccion(1, F1, model_id=3, version="gbm", pred=100),
                                  prediccion(2, F2, model_id=1, version="baseline_dh_v1", pred=200)],
                    ejecuciones={E_PRED_A: {"tipo": "prediccion", "resumen": resumen}})
-    for modelo, esperado, oculta in (("3", [100.0], F2), ("1", [200.0], F1)):
+    for modelo, esperado, oculta in ((("3", "gbm"), [100.0], F2), (("1", "baseline_dh_v1"), [200.0], F1)):
         st = ejecutar(monkeypatch, api, valores={"Modelo": modelo})
         assert any("más de un modelo" in w for w in st.de_tipo("warning"))
         assert grafico(st)["demanda_pred"].tolist() == esperado
@@ -626,13 +649,15 @@ def test_recomendacion_se_explica_con_los_valores_de_la_api_sin_recalcular(monke
     assert pasos["Factor de carga máximo"] == "0.435"
     asociadas = [p for p in api.de("predictions") if p.get("execution_id")]
     assert asociadas and all(p["execution_id"] == E_PRED_A for p in asociadas)
-    assert all(p["desde"] == "2025-10-01T00:00:00" and p["horizonte_min"] == 60 for p in asociadas)
+    assert all(p["desde"] == "2025-10-01T00:00:00-05:00" and p["horizonte_min"] == 60
+               for p in asociadas)
     textos = st.textos()
     assert f"Ejecución de recomendaciones: {E_FREC_A}" in textos
     assert f"ejecución de predicciones asociada: {E_PRED_A}" in textos
     assert f"prediction_id 10 de la ejecución {E_PRED_A}" in textos
     assert "no los recalcula" in textos and "headway_minimo_min" in textos
     assert "no ofrece explicación local" in textos
+    assert xp.ALCANCE_RF015 in textos and "limitación pendiente de RF-015" in textos
 
 
 def test_ejecucion_sin_predicciones_asociadas_no_usa_otra_ejecucion(monkeypatch):
@@ -684,3 +709,231 @@ def test_el_tablero_solo_hace_get_al_cargar(monkeypatch):
     ejecutar(monkeypatch, api)            # requests.post/patch lanzan si se llaman
     assert {r.split("/")[0] for r, _ in api.llamadas} <= {"predictions", "recommendations", "alerts",
                                                           "frequency"}
+
+
+# ====================================================== modelo = (model_id, model_version)
+
+def test_mismo_model_id_con_dos_versiones_son_modelos_distintos():
+    filas = [prediccion(1, F1, model_id=3, version="gbm_v1", pred=100),
+             prediccion(2, F2, model_id=3, version="gbm_v2", pred=200),
+             prediccion(3, F3, model_id=3, version="gbm_v2", pred=300)]
+    assert xp.modelos(filas) == [(("3", "gbm_v2"), 2), (("3", "gbm_v1"), 1)]
+    assert [f["prediction_id"] for f in xp.de_modelo(filas, ("3", "gbm_v1"))] == [1]
+    assert [o["franja_inicio"] for o in xp.ocultas_por_modelo(filas, ("3", "gbm_v1"))] == [F2, F3]
+
+
+def test_tablero_separa_versiones_con_el_mismo_model_id(monkeypatch):
+    api = ApiFalsa(predicciones=[prediccion(1, F1, model_id=3, version="gbm_v1", pred=100),
+                                 prediccion(2, F2, model_id=3, version="gbm_v2", pred=200),
+                                 prediccion(3, F3, model_id=3, version="gbm_v2", pred=300)])
+    casos = ((("3", "gbm_v1"), [100.0], [F2, F3], "gbm_v2"),
+             (("3", "gbm_v2"), [200.0, 300.0], [F1], "gbm_v1"))
+    for modelo, mostradas, ocultas_esperadas, version_oculta in casos:
+        st = ejecutar(monkeypatch, api, valores={"Modelo": modelo})
+        assert any("más de un modelo" in w for w in st.de_tipo("warning"))
+        assert grafico(st)["demanda_pred"].tolist() == mostradas
+        (ocultas,) = [d for d in st.de_tipo("dataframe")
+                      if list(d.columns) == ["franja_inicio", "model_id", "model_version"]]
+        assert sorted(ocultas.franja_inicio) == ocultas_esperadas
+        assert set(ocultas.model_version) == {version_oculta}
+        tabla = next(d for d in st.de_tipo("dataframe") if "nivel_intervalo" in d)
+        assert set(tabla.model_version) == {modelo[1]}                          # sin mezclar versiones
+        assert not set(tabla.franja_inicio) & set(ocultas_esperadas)
+        assert f"model_version: {modelo[1]}" in st.textos()
+
+
+# ============================================================= filtro diario en hora de Bogotá
+
+def test_la_consulta_recibe_el_dia_de_bogota_con_desplazamiento(monkeypatch):
+    api = ApiFalsa(predicciones=[prediccion(1, F1)])
+    ejecutar(monkeypatch, api, valores={"Día": pd.Timestamp("2026-11-19")})
+    (primera, *_) = api.de("predictions")
+    assert primera == {"idruta": 16, "horizonte_min": 60, "desde": "2026-11-19T00:00:00-05:00",
+                       "hasta": "2026-11-20T00:00:00-05:00", "pagina": 1, "tamano": 500}
+    for params in api.de("predictions") + api.de("recommendations"):
+        assert params["desde"].endswith("-05:00") and params["hasta"].endswith("-05:00")
+
+
+def test_el_filtro_diario_no_trae_el_dia_anterior_ni_el_siguiente(monkeypatch):
+    dentro = {"2025-10-01T00:00:00-05:00": 1.0,          # primer instante del día
+              "2025-10-01T23:45:00-05:00": 2.0,          # última franja
+              "2025-10-02T04:30:00+00:00": 3.0}          # = 23:30 del 1 en Bogotá, escrita en UTC
+    fuera = {"2025-09-30T23:45:00-05:00": 91.0,          # día anterior
+             "2025-10-02T00:00:00-05:00": 92.0,          # día siguiente (hasta es exclusivo)
+             "2025-10-01T04:59:00+00:00": 93.0}          # = 23:59 del 30 en Bogotá, escrita en UTC
+    filas = [prediccion(i, franja, pred=v, li=v, ls=v)
+             for i, (franja, v) in enumerate({**dentro, **fuera}.items(), start=1)]
+    st = ejecutar(monkeypatch, ApiFalsa(predicciones=filas))
+    assert sorted(grafico(st)["demanda_pred"].tolist()) == sorted(dentro.values())
+
+
+def test_franjas_con_y_sin_zona_en_la_misma_ejecucion_no_se_grafican(monkeypatch):
+    api = ApiFalsa(predicciones=[prediccion(1, F1), prediccion(2, "2025-10-01T06:15:00")])
+    st = ejecutar(monkeypatch, api)
+    assert st.de_tipo("line_chart") == []
+    assert any("mezclan fechas con y sin zona horaria" in w for w in st.de_tipo("warning"))
+
+
+# ======================================================== execution_id nulo, ausente o vacío
+
+def _sin_execution_id(fila):
+    fila = dict(fila)
+    del fila["execution_id"]
+    return fila
+
+
+INVALIDOS = [None, "", "   ", "None", "no-es-uuid"]
+
+
+@pytest.mark.parametrize("valor", INVALIDOS + [float("nan"), numpy.nan, pd.NA, pd.NaT, True])
+def test_id_ejecucion_rechaza_nulos_vacios_y_no_uuid(valor):
+    assert xp.id_ejecucion(valor) is None
+
+
+def test_varias_filas_sin_execution_id_incluido_nan_no_forman_una_ejecucion(monkeypatch):
+    nulos = [None, float("nan"), None]
+    api = ApiFalsa(predicciones=[prediccion(i, f, eid=v) for i, (f, v) in enumerate(zip((F1, F2, F3), nulos),
+                                                                                    start=1)])
+    g = xp.separar_ejecuciones(api.tablas["predictions"][1])
+    assert g.lista == [] and g.excluidas == 3
+    st = ejecutar(monkeypatch, api)
+    assert "frequency/executions/None" not in [r for r, _ in api.llamadas]
+    assert not [r for r, _ in api.llamadas if r.startswith("frequency/")]
+    assert st.de_tipo("line_chart") == []
+    assert any("Ninguna fila tiene un execution_id válido" in w for w in st.de_tipo("warning"))
+
+
+def test_filas_sin_execution_id_valido_no_forman_una_ejecucion():
+    filas = ([prediccion(i, F1, eid=v) for i, v in enumerate(INVALIDOS, start=1)]
+             + [_sin_execution_id(prediccion(9, F2)), prediccion(10, F3, eid=E_PRED_A)])
+    g = xp.separar_ejecuciones(filas)
+    assert [(e.execution_id, e.filas) for e in g.lista] == [(E_PRED_A, 1)]
+    assert g.excluidas == len(INVALIDOS) + 1
+    for invalido in INVALIDOS:
+        assert xp.de_ejecucion(filas, invalido) == []                # nunca agrupa los inválidos
+    assert [f["prediction_id"] for f in xp.de_ejecucion(filas, E_PRED_A)] == [10]
+
+
+def test_tablero_excluye_y_cuenta_filas_sin_execution_id(monkeypatch):
+    api = ApiFalsa(predicciones=[prediccion(1, F1, eid=None, pred=10),
+                                 _sin_execution_id(prediccion(2, F2, pred=20)),
+                                 prediccion(3, F3, eid="", pred=30),
+                                 prediccion(4, F1, eid=E_PRED_A, pred=40)])
+    st = ejecutar(monkeypatch, api)
+    assert any("Se excluyeron 3 filas sin execution_id válido" in w for w in st.de_tipo("warning"))
+    assert grafico(st)["demanda_pred"].tolist() == [40.0]
+    assert any(f"Ejecución de predicciones: {E_PRED_A} · 1 franjas mostradas · descartadas: 0 filas de "
+               "otras ejecuciones" in c for c in st.de_tipo("caption"))
+    assert "None" not in " ".join(st.de_tipo("caption"))
+    assert [r for r, _ in api.llamadas if r.startswith("frequency/")] == [f"frequency/executions/{E_PRED_A}"]
+
+
+def test_sin_ninguna_ejecucion_valida_no_se_grafica_ni_se_consulta(monkeypatch):
+    api = ApiFalsa(predicciones=[prediccion(1, F1, eid=None), prediccion(2, F2, eid="")],
+                   recomendaciones=[recomendacion(1, F1, eid=None),
+                                    _sin_execution_id(recomendacion(2, F2))])
+    st = ejecutar(monkeypatch, api)
+    assert st.de_tipo("line_chart") == [] and st.de_tipo("bar_chart") == []
+    assert not [r for r, _ in api.llamadas if r.startswith("frequency/")]
+    assert not [p for p in api.de("predictions") if "execution_id" in p]
+    assert sum("Ninguna fila tiene un execution_id válido" in w for w in st.de_tipo("warning")) == 2
+    assert not [c for c in st.de_tipo("caption") if "Ejecución de" in c]      # nunca "Ejecución None"
+
+
+def test_ejecucion_asociada_invalida_no_se_consulta(monkeypatch):
+    api = escenario_recomendacion()
+    api.ejecuciones[E_FREC_A] = ejecucion_frecuencias("None")
+    st = ejecutar(monkeypatch, api)
+    assert not [p for p in api.de("predictions") if "execution_id" in p]
+    assert any("identificador no es válido" in w for w in st.de_tipo("warning"))
+    assert tabla_pasos(st).valor["Demanda del horizonte"] == xp.NO_DISPONIBLE
+
+
+# ==================================================================== franjas duplicadas
+
+def llamadas_frequency(api):
+    return [r for r, _ in api.llamadas if r.startswith("frequency/")]
+
+
+@pytest.mark.parametrize("cambio", [
+    {"segmento_id": "S1"},
+    {"data_cutoff": "2025-09-30T00:00:00-05:00"},
+], ids=["segmento_id", "data_cutoff"])
+def test_predicciones_duplicadas_no_se_grafican_ni_consultan_la_api(monkeypatch, cambio):
+    otra = {**prediccion(2, F1, pred=999), **cambio}
+    api = ApiFalsa(predicciones=[prediccion(1, F1, pred=100), otra, prediccion(3, F2)])
+    st = ejecutar(monkeypatch, api)
+    assert st.de_tipo("line_chart") == []
+    assert llamadas_frequency(api) == []                           # ni siquiera el respaldo
+    assert any("2 predicciones comparten franja" in w for w in st.de_tipo("warning"))
+    (tabla,) = [d for d in st.de_tipo("dataframe")
+                if list(d.columns) == list(xp.COLUMNAS_DUPLICADO_PREDICCION)]
+    assert sorted(tabla.prediction_id) == [1, 2]                     # ambas, sin elegir
+    columna = next(iter(cambio))
+    assert set(tabla[columna]) == {prediccion(1, F1)[columna], cambio[columna]}
+
+
+def test_mismo_instante_con_distinto_desplazamiento_es_duplicado(monkeypatch):
+    api = ApiFalsa(predicciones=[prediccion(1, F1), prediccion(2, "2025-10-01T11:00:00+00:00")])
+    st = ejecutar(monkeypatch, api)
+    assert st.de_tipo("line_chart") == []
+    (tabla,) = [d for d in st.de_tipo("dataframe") if "prediction_id" in d and "segmento_id" in d]
+    assert sorted(tabla.franja_inicio) == ["2025-10-01T06:00:00-05:00", "2025-10-01T11:00:00+00:00"]
+
+
+def test_duplicados_solo_entre_fechas_comparables():
+    assert xp.clave_instante(F1) == xp.clave_instante("2025-10-01T11:00:00+00:00")
+    assert xp.clave_instante(F1) != xp.clave_instante("2025-10-01T06:00:00")    # con zona vs sin zona
+    assert xp.clave_instante("no es fecha") is None
+    clave, cols = xp.CLAVE_FRANJA_PREDICCION, xp.COLUMNAS_DUPLICADO_PREDICCION
+    assert xp.franjas_duplicadas([prediccion(1, F1), prediccion(2, "2025-10-01T06:00:00")], clave, cols) == []
+    assert xp.franjas_duplicadas([prediccion(1, F1), prediccion(2, F1, h=30)], clave, cols) == []
+    assert xp.franjas_duplicadas([prediccion(1, F1), prediccion(2, F1, version="otra")], clave, cols) == []
+    assert len(xp.franjas_duplicadas([prediccion(1, F1), prediccion(2, F1)], clave, cols)) == 2
+
+
+@pytest.mark.parametrize("segunda", [F1, "2025-10-01T11:00:00+00:00"],
+                         ids=["misma_cadena", "otro_desplazamiento"])
+def test_recomendaciones_duplicadas_no_se_grafican_explican_ni_consultan(monkeypatch, segunda):
+    api = escenario_recomendacion()
+    api.tablas["recommendations"] = ("recommendation_id", [
+        recomendacion(1, F1, buses_hora_recomendado=2), recomendacion(2, segunda, buses_hora_recomendado=9)])
+    st = ejecutar(monkeypatch, api)
+    assert st.de_tipo("bar_chart") == []
+    assert not [d for d in st.de_tipo("dataframe") if "concepto" in d]          # sin explicación
+    assert f"frequency/executions/{E_FREC_A}" not in llamadas_frequency(api)
+    assert not [p for p in api.de("predictions") if "execution_id" in p]
+    (tabla,) = [d for d in st.de_tipo("dataframe")
+                if list(d.columns) == list(xp.COLUMNAS_DUPLICADO_RECOMENDACION)]
+    assert sorted(tabla.recommendation_id) == [1, 2]
+    assert any("2 recomendaciones comparten franja" in w for w in st.de_tipo("warning"))
+    assert "no consultada (datos ambiguos)" in st.textos()
+
+
+
+# =========================================================== normalización y caso sin duplicados
+
+def test_clave_instante_normaliza_en_bogota():
+    esperado = ("con_zona", pd.Timestamp(F1).tz_convert("America/Bogota"))
+    assert xp.clave_instante("2025-10-01T11:00:00Z") == esperado
+    assert str(xp.clave_instante("2025-10-01T11:00:00+00:00")[1].tz) == "America/Bogota"
+    assert xp.clave_instante("2025-10-01 06:00:00-0500") == xp.clave_instante(F1)       # otro formato
+
+
+def test_sin_duplicados_se_grafica_y_se_explica_normalmente(monkeypatch):
+    api = escenario_recomendacion()
+    api.tablas["predictions"][1].extend([prediccion(11, F2, pred=70), prediccion(12, F3, pred=80)])
+    api.tablas["recommendations"] = ("recommendation_id", [
+        recomendacion(1, F1, buses_hora_recomendado=2), recomendacion(2, F2, buses_hora_recomendado=3),
+        recomendacion(3, F3, buses_hora_recomendado=4)])
+    franja_2 = xp.clave_instante(F2)
+    st = ejecutar(monkeypatch, api, valores={"Ejecución de predicción": E_PRED_A,
+                                             "Franja a explicar": franja_2})
+    assert not [w for w in st.de_tipo("warning") if "comparten franja" in w]
+    assert grafico(st)["demanda_pred"].tolist() == [61.72, 70.0, 80.0]
+    (barras,) = st.de_tipo("bar_chart")
+    assert barras["buses_hora_recomendado"].tolist() == [2.0, 3.0, 4.0]
+    assert st.opciones["Franja a explicar"] == [F1, F2, F3]                        # se ven tal como llegaron
+    pasos = tabla_pasos(st).valor
+    assert pasos["Buses por hora recomendados"] == "3" and pasos["Demanda del horizonte"] == "70"
+    assert f"frequency/executions/{E_FREC_A}" in [r for r, _ in api.llamadas]
