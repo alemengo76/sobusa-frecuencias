@@ -77,22 +77,33 @@ class ApiFalsa:
     """GET con el contrato de la API: filtros de igualdad, desde/hasta sobre franja_inicio,
     ORDER BY id DESC y paginación. Registra cada llamada."""
 
-    def __init__(self, predicciones=(), recomendaciones=(), ejecuciones=None, alertas=(), fallar=()):
+    def __init__(self, predicciones=(), recomendaciones=(), ejecuciones=None, alertas=(), fallar=(),
+                 modelos=(), explicaciones=None):
         self.tablas = {"predictions": ("prediction_id", list(predicciones)),
                        "recommendations": ("recommendation_id", list(recomendaciones)),
                        "alerts": ("alert_id", list(alertas))}
         self.ejecuciones = ejecuciones or {}
         self.fallar = set(fallar)
+        self.modelos = list(modelos)                 # filas de GET /models
+        self.explicaciones = explicaciones or {}     # prediction_id -> (código HTTP, cuerpo)
         self.llamadas = []
 
     def __call__(self, url, params=None, timeout=None, **otros):
         assert otros == {}, otros
-        assert timeout == 10
         ruta = url[len(API) + 1:]
+        assert timeout == (120 if ruta.endswith("/explanation") else 10)
         p = dict(params or {})
         self.llamadas.append((ruta, p))
         if ruta in self.fallar:
             return respuesta(500, b'{"error": {"mensaje": "x"}}', url)
+        if ruta == "models":
+            return respuesta(200, json.dumps({"datos": self.modelos}).encode(), url)
+        if ruta.startswith("predictions/") and ruta.endswith("/explanation"):
+            pid = int(ruta.split("/")[1])
+            codigo, cuerpo = self.explicaciones.get(
+                pid, (404, {"error": {"codigo": "no_encontrado", "mensaje": f"Predicción {pid} no existe"}}))
+            contenido = cuerpo if isinstance(cuerpo, bytes) else json.dumps(cuerpo).encode()
+            return respuesta(codigo, contenido, url)
         if ruta.startswith("frequency/executions/"):
             eid = ruta.rsplit("/", 1)[1]
             if eid not in self.ejecuciones:
@@ -529,10 +540,15 @@ def test_explicar_recomendacion_sin_prediccion_declara_lo_que_falta_y_por_que():
         assert parametro in faltan
 
 
-def test_los_textos_no_afirman_explicacion_local_del_modelo():
+def test_los_textos_declaran_el_alcance_real_de_la_explicacion():
     texto = " ".join(xp.LIMITACIONES_PREDICCION).lower()
-    assert "no ofrece explicación local" in texto
+    assert "solo para predicciones del gbm" in texto and "si la api la verifica" in texto
     assert "no es un intervalo de confianza" in texto
+    alcance = xp.ALCANCE_RF015.lower()
+    for parte in ("permutación (modelo de evaluación", "ganancia (artefacto de producción)",
+                  "reconstruida y verificada", "sin garantía",
+                  "línea base no tienen explicación individual"):
+        assert parte in alcance
 
 
 # ======================================================================== tablero: predicción
@@ -574,7 +590,7 @@ def test_predicciones_muestran_valores_version_y_nivel_de_la_api(monkeypatch):
         assert esperado in textos
     t = tabla_intervalos(st)
     assert t["Compatible numéricamente con la banda provisional"] == 1 and t["Colapsado"] == 1
-    assert "no ofrece explicación local" in textos
+    assert "Explicación del modelo de demanda" in textos
 
 
 def test_varios_modelos_identifican_franjas_ocultas_y_respaldo(monkeypatch):
@@ -656,8 +672,8 @@ def test_recomendacion_se_explica_con_los_valores_de_la_api_sin_recalcular(monke
     assert f"ejecución de predicciones asociada: {E_PRED_A}" in textos
     assert f"prediction_id 10 de la ejecución {E_PRED_A}" in textos
     assert "no los recalcula" in textos and "headway_minimo_min" in textos
-    assert "no ofrece explicación local" in textos
-    assert xp.ALCANCE_RF015 in textos and "limitación pendiente de RF-015" in textos
+    assert "regla operativa de recomendación, no las del modelo" in textos
+    assert xp.ALCANCE_RF015 in textos
 
 
 def test_ejecucion_sin_predicciones_asociadas_no_usa_otra_ejecucion(monkeypatch):
@@ -708,7 +724,8 @@ def test_el_tablero_solo_hace_get_al_cargar(monkeypatch):
     api = escenario_recomendacion()
     ejecutar(monkeypatch, api)            # requests.post/patch lanzan si se llaman
     assert {r.split("/")[0] for r, _ in api.llamadas} <= {"predictions", "recommendations", "alerts",
-                                                          "frequency"}
+                                                          "frequency", "models"}
+    assert not [r for r, _ in api.llamadas if r.endswith("/explanation")]      # solo al pulsar el botón
 
 
 # ====================================================== modelo = (model_id, model_version)

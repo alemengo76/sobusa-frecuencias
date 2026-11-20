@@ -18,13 +18,18 @@ Principios
 
 Alcance de RF-015
 -----------------
-Se explica la regla operativa de frecuencias (regla aplicada, variables de la fórmula y valores
-guardados como evidencia cuantitativa). NO se ofrece explicación local de las variables que influyeron
-en cada pronóstico: la API no la expone. Es una limitación de cumplimiento de RF-015 pendiente; aquí
-no se simula ni se infiere importancia de variables.
+Tres explicaciones distintas, que el tablero muestra por separado:
+1. Importancia global del modelo: por permutación (GET /models, calculada con el MODELO DE EVALUACIÓN
+   del entrenamiento) y por ganancia del ARTEFACTO de producción (la devuelve la explicación individual).
+2. Explicación individual de una predicción del GBM: aportes TreeSHAP calculados por la API
+   (GET /predictions/{id}/explanation, backend A1), "reconstruida y verificada", no una garantía de que
+   las entradas históricas sean idénticas. Aquí no se calcula ni se infiere ningún aporte.
+3. Regla operativa de frecuencias: regla aplicada, variables de la fórmula y valores guardados.
+Las predicciones de línea base no tienen explicación individual.
 """
 from __future__ import annotations
 
+import math
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -71,16 +76,20 @@ DESCRIPCION_INTERVALO = {
 }
 
 ALCANCE_RF015 = (
-    "Alcance de RF-015: se explica la regla operativa de frecuencias con los valores guardados como "
-    "evidencia cuantitativa. La explicación local de las variables que influyeron en cada pronóstico "
-    "no está disponible en la API: es una limitación pendiente de RF-015.")
+    "Alcance de RF-015: (1) importancia global del modelo, por permutación (modelo de evaluación del "
+    "entrenamiento) y por ganancia (artefacto de producción); (2) explicación individual TreeSHAP de "
+    "predicciones del GBM, reconstruida y verificada por la API, sin garantía de que las entradas "
+    "históricas sean idénticas; (3) regla operativa de frecuencias con sus valores guardados. "
+    "Limitaciones: las predicciones de línea base no tienen explicación individual; si la API no puede "
+    "verificar una predicción no se muestra ninguna explicación; la explicación individual requiere el "
+    "endpoint del backend A1.")
 
 LIMITACIONES_PREDICCION = (
     "nivel_intervalo es el nivel nominal guardado con la predicción. Según el código de la API, el "
     "intervalo sale de errores históricos del modelo o de una banda fija provisional; no es un "
     "intervalo de confianza estadístico y la API no guarda por fila qué método se usó.",
-    "La API no ofrece explicación local de las variables del modelo para cada predicción: este "
-    "tablero no la muestra.",
+    "La explicación individual de las variables (TreeSHAP) se consulta en «Explicación del modelo de "
+    "demanda»: solo para predicciones del GBM y solo si la API la verifica.",
 )
 
 # Parámetros que intervienen en la regla pero que la API no devuelve con la recomendación.
@@ -554,3 +563,129 @@ def explicar_recomendacion(rec: Mapping, prediccion: Mapping | None,
         "motivo": rec.get("motivo_no_viable"),
         "no_disponibles": no_disponibles,
     }
+
+
+# -------------------------------------------------------------- explicación del modelo (RF-015, A1)
+
+METODO_GBM = "gbm_fe31"                 # app/ml/modelo_gbm.METODO (no se importa app.*)
+ESTADO_VERIFICADO = "reconstruida_y_verificada"
+N_VARIABLES_MODELO = 29
+# La API ya verificó la identidad con 1e-9; aquí solo se descartan respuestas incoherentes.
+TOLERANCIA_RESPUESTA = 1e-6
+TEXTO_PERMUTACION = (
+    "Importancia por permutación del MODELO DE EVALUACIÓN del entrenamiento, no del artefacto de "
+    "producción: cuánto aumenta el error absoluto medio (pasajeros) al desordenar cada variable. Solo las "
+    "10 primeras; mide influencia global, no el efecto en una predicción.")
+TEXTO_GANANCIA = (
+    "Importancia por ganancia del ARTEFACTO DE PRODUCCIÓN: proporción de la reducción de la pérdida de "
+    "entrenamiento lograda en las divisiones de cada variable. Es global, favorece a las variables con "
+    "muchas divisiones y no equivale a la importancia por permutación.")
+TEXTO_ESCALA = (
+    "Los aportes TreeSHAP están en escala logarítmica (pérdida Poisson): predicción = referencia × "
+    "producto de los factores, con factor = exp(aporte). Son factores multiplicativos, no pasajeros que "
+    "se suman.")
+TEXTO_REFERENCIA = (
+    "Referencia = exp(referencia_log): el valor esperado del modelo en escala logarítmica sobre los datos "
+    "de entrenamiento (ponderado por la cubierta de cada nodo). Es una media geométrica, no la demanda "
+    "media.")
+TEXTO_LINEA_BASE = (
+    "Esta predicción es de un modelo de línea base: no tiene explicación individual TreeSHAP (el método "
+    "solo aplica al GBM FE 3.1).")
+
+
+def modelo_registrado(modelos, modelo: tuple[str, str]) -> Mapping | None:
+    """Fila de GET /models con la misma pareja (model_id, model_version); None si no hay una única."""
+    if not isinstance(modelos, list):
+        return None
+    filas = [m for m in modelos if isinstance(m, Mapping)
+             and (str(m.get("model_id")), str(m.get("version"))) == tuple(modelo)]
+    return filas[0] if len(filas) == 1 else None
+
+
+def es_gbm(registro: Mapping | None) -> bool:
+    hiper = registro.get("hiperparametros") if isinstance(registro, Mapping) else None
+    return isinstance(hiper, Mapping) and hiper.get("metodo") == METODO_GBM
+
+
+def importancia_permutacion(registro: Mapping | None) -> list[dict] | None:
+    """metricas.importancia_top10 tal como la guarda el registro; None si falta o no es válida."""
+    metricas = registro.get("metricas") if isinstance(registro, Mapping) else None
+    filas = metricas.get("importancia_top10") if isinstance(metricas, Mapping) else None
+    if not isinstance(filas, list) or not filas:
+        return None
+    if not all(isinstance(f, Mapping) and isinstance(f.get("variable"), str)
+               and _decimal(f.get("importancia_mae")) is not None for f in filas):
+        return None
+    return [{"variable": f["variable"], "importancia_mae": f["importancia_mae"]} for f in filas]
+
+
+def _finito(valor) -> bool:
+    return isinstance(valor, (int, float)) and not isinstance(valor, bool) and math.isfinite(valor)
+
+
+def validar_explicacion(resp, fila: Mapping) -> str | None:
+    """Motivo para descartar la respuesta del endpoint, o None si se puede mostrar completa.
+
+    Exige que sea la explicación verificada de ESTA predicción (prediction_id, ejecución y modelo), con
+    los 29 aportes y la identidad referencia + suma = predicción (escala log)."""
+    if not isinstance(resp, Mapping):
+        return "la respuesta no es un objeto"
+    if resp.get("estado") != ESTADO_VERIFICADO:
+        return f"estado {resp.get('estado')!r} distinto de {ESTADO_VERIFICADO!r}"
+    for campo, esperado in (("prediction_id", fila.get("prediction_id")), ("model_id", fila.get("model_id")),
+                            ("model_version", fila.get("model_version"))):
+        if str(resp.get(campo)) != str(esperado):
+            return f"{campo} {resp.get(campo)!r} no es el de la predicción seleccionada ({esperado!r})"
+    eid = id_ejecucion(resp.get("execution_id"))
+    if eid is None or eid != id_ejecucion(fila.get("execution_id")):
+        return "la ejecución de la explicación no es la de la predicción seleccionada"
+    aportes = resp.get("aportes")
+    if not isinstance(aportes, list) or len(aportes) != N_VARIABLES_MODELO:
+        return f"se esperaban {N_VARIABLES_MODELO} aportes"
+    if not all(isinstance(a, Mapping) and isinstance(a.get("variable"), str) and _finito(a.get("aporte_log"))
+               and _finito(a.get("factor")) for a in aportes):
+        return "hay aportes incompletos o no numéricos"
+    if len({a["variable"] for a in aportes}) != N_VARIABLES_MODELO:
+        return "hay variables repetidas en los aportes"
+    for campo in ("referencia_log", "referencia_pasajeros", "prediccion_log", "prediccion_pasajeros"):
+        if not _finito(resp.get(campo)):
+            return f"falta {campo}"
+    suma = resp["referencia_log"] + math.fsum(a["aporte_log"] for a in aportes)
+    if abs(suma - resp["prediccion_log"]) > TOLERANCIA_RESPUESTA:
+        return "los aportes no suman la predicción"
+    if not isinstance(resp.get("verificaciones"), Mapping):
+        return "faltan las verificaciones"
+    imp = resp.get("importancia_global_artefacto")
+    if not isinstance(imp, Mapping) or not isinstance(imp.get("variables"), list):
+        return "falta la importancia global del artefacto"
+    return None
+
+
+def interpretacion_aporte(aporte: Mapping) -> str:
+    if aporte["aporte_log"] > 0:
+        sentido = "la aumenta"
+    elif aporte["aporte_log"] < 0:
+        sentido = "la disminuye"
+    else:
+        sentido = "no la cambia"
+    return f"multiplica la predicción por {aporte['factor']:.4f} ({sentido})"
+
+
+def filas_aportes(resp: Mapping) -> list[dict]:
+    """Aportes en el orden de la API (mayor magnitud primero), con su interpretación."""
+    return [{"variable": a["variable"], "valor": _texto(a.get("valor")),
+             "valor que ve el modelo": _texto(a.get("valor_modelo")), "aporte (escala log)": a["aporte_log"],
+             "factor": a["factor"], "interpretación": interpretacion_aporte(a)} for a in resp["aportes"]]
+
+
+def filas_importancia_ganancia(resp: Mapping) -> list[dict]:
+    return [{"variable": v.get("variable"), "proporción de la ganancia": v.get("proporcion"),
+             "divisiones": v.get("divisiones")}
+            for v in resp["importancia_global_artefacto"]["variables"] if isinstance(v, Mapping)]
+
+
+def mensaje_error_api(cuerpo) -> str:
+    """Mensaje del error uniforme de la API ({"error": {"mensaje": ...}}), o un texto genérico."""
+    error = cuerpo.get("error") if isinstance(cuerpo, Mapping) else None
+    mensaje = error.get("mensaje") if isinstance(error, Mapping) else None
+    return mensaje if isinstance(mensaje, str) and mensaje else "sin detalle de la API"

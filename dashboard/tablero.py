@@ -190,6 +190,103 @@ def mostrar_predicciones(filtros: dict) -> None:
     columnas = ["franja_inicio", "demanda_pred", "limite_inferior", "limite_superior",
                 "nivel_intervalo", "model_version"]
     st.dataframe(pd.DataFrame(filas)[columnas])
+    mostrar_explicacion_modelo(filas)
+
+
+def _registro_modelo(modelo: tuple[str, str]) -> tuple[bool, dict | None]:
+    """(se pudo consultar GET /models, fila del modelo con ese model_id y versión o None)."""
+    try:
+        cuerpo = _get("models", {})
+    except (requests.RequestException, ValueError) as e:
+        st.warning(f"No se pudo consultar el registro de modelos ({type(e).__name__}).")
+        return False, None
+    registro = xp.modelo_registrado(cuerpo.get("datos") if isinstance(cuerpo, dict) else None, modelo)
+    if registro is None:
+        st.warning(f"El modelo {modelo[1]} (model_id {modelo[0]}) no aparece una única vez en el registro.")
+    return True, registro
+
+
+def _explicar_prediccion(fila: dict) -> None:
+    """Pide al backend A1 la explicación de UNA predicción y la muestra solo si está completa y es suya."""
+    pid = fila["prediction_id"]
+    try:
+        r = requests.get(f"{API}/predictions/{pid}/explanation", timeout=120)
+    except requests.RequestException as e:
+        st.error(f"No se pudo consultar la explicación de la predicción {pid} ({type(e).__name__}). "
+                 "No se muestra ninguna explicación.")
+        return
+    try:
+        cuerpo = r.json()
+    except ValueError:
+        cuerpo = None
+    if r.status_code != 200:
+        st.error(f"La API no explicó la predicción {pid} (HTTP {r.status_code}): "
+                 f"{xp.mensaje_error_api(cuerpo)}. No se muestra ninguna explicación.")
+        return
+    motivo = xp.validar_explicacion(cuerpo, fila)
+    if motivo is not None:
+        st.error(f"Se descartó la respuesta de la API para la predicción {pid}: {motivo}. "
+                 "No se muestra ninguna explicación.")
+        return
+    st.caption(f"Predicción {pid} · ejecución {cuerpo['execution_id']} · "
+               f"modelo {cuerpo['model_version']} "
+               f"(model_id {cuerpo['model_id']}, {cuerpo.get('feature_version')}, scikit-learn "
+               f"{cuerpo.get('scikit_learn')}) · artefacto SHA-256 {cuerpo.get('artefacto_sha256')}")
+    st.info(f"Estado: {cuerpo['estado']}. {cuerpo.get('advertencia', '')}")
+    verif = cuerpo["verificaciones"]
+    st.caption(f"Verificado por la API: {verif.get('reproduccion', {}).get('predicciones_comparadas')} "
+               "predicciones de la ejecución y la ruta reproducidas; identidad referencia + aportes = "
+               f"predicción con error {verif.get('identidad_treeshap', {}).get('error_absoluto')}.")
+    st.write(f"Referencia: {cuerpo['referencia_pasajeros']} pasajeros (log {cuerpo['referencia_log']}) · "
+             f"predicción del modelo: {cuerpo['prediccion_pasajeros']} (log {cuerpo['prediccion_log']}) · "
+             f"guardada: {cuerpo.get('demanda_pred')}")
+    st.caption(xp.TEXTO_REFERENCIA)
+    st.caption(xp.TEXTO_ESCALA)
+    st.dataframe(pd.DataFrame(xp.filas_aportes(cuerpo)))
+    imp = cuerpo["importancia_global_artefacto"]
+    st.subheader("Importancia global por ganancia del artefacto de producción")
+    st.caption(f"{xp.TEXTO_GANANCIA} Artefacto: {imp.get('model_version')}.")
+    st.dataframe(pd.DataFrame(xp.filas_importancia_ganancia(cuerpo)))
+
+
+def mostrar_explicacion_modelo(filas: list[dict]) -> None:
+    """RF-015, explicación del MODELO de demanda (no de la regla operativa): importancia global y
+    explicación individual TreeSHAP de una predicción de la ejecución y el modelo mostrados."""
+    st.subheader("Explicación del modelo de demanda")
+    st.caption("Explica el modelo que predice la demanda. La regla operativa que recomienda buses y "
+               "frecuencia se explica en la pestaña «Frecuencia recomendada».")
+    modelo = xp.clave_modelo(filas[0])          # las filas ya son de una sola ejecución y un solo modelo
+    consultado, registro = _registro_modelo(modelo)
+
+    st.subheader("Importancia global del modelo")
+    permutacion = xp.importancia_permutacion(registro)
+    if permutacion is not None:
+        evaluacion = (registro.get("metricas") or {}).get("evaluacion")
+        st.caption(xp.TEXTO_PERMUTACION + (f" Evaluación: {evaluacion}." if evaluacion else ""))
+        st.dataframe(pd.DataFrame(permutacion))
+    else:
+        st.caption("Importancia por permutación: no disponible para este modelo en el registro.")
+    st.caption("La importancia por ganancia del artefacto de producción la devuelve la API junto con la "
+               "explicación individual de una predicción del GBM.")
+
+    st.subheader("Explicación individual de una predicción")
+    if consultado and registro is not None and not xp.es_gbm(registro):
+        st.info(xp.TEXTO_LINEA_BASE)
+        return
+    por_id = {str(f["prediction_id"]): f for f in sorted(
+        filas, key=lambda f: (xp.clave_instante(f.get("franja_inicio")) is None,
+                              str(f.get("franja_inicio")), str(f.get("prediction_id"))))}
+    if len(por_id) != len(filas):
+        st.warning("Hay prediction_id repetidos en la selección: no se ofrece explicación individual.")
+        return
+    etiquetas = {i: f"{f.get('franja_inicio')} · prediction_id {i}" for i, f in por_id.items()}
+    elegido = st.selectbox("Predicción a explicar", list(por_id), key="prediccion_explicada",
+                           format_func=etiquetas.get)
+    if not st.button("Consultar explicación", key="consultar_explicacion"):
+        st.caption("Pulse «Consultar explicación»: la API reconstruye las variables y verifica la "
+                   "ejecución antes de explicar (puede tardar unos segundos).")
+        return
+    _explicar_prediccion(por_id[elegido])
 
 
 def _predicciones_asociadas(eid: str, filtros: dict) -> tuple[str | None, list[dict], str | None]:
@@ -254,7 +351,7 @@ def mostrar_recomendaciones(filtros: dict) -> None:
         st.dataframe(pd.DataFrame(no_viables)[["franja_inicio", "vehiculos_requeridos", "flota_tope",
                                                "motivo_no_viable"]])
 
-    st.subheader("Explicación de la recomendación")
+    st.subheader("Explicación de la recomendación (regla operativa y evidencia cuantitativa)")
     # Franjas por instante normalizado (nunca por texto); los duplicados ya se descartaron arriba
     claves = [(xp.clave_instante(f.get("franja_inicio")), f) for f in filas]
     if any(k is None for k, _ in claves):
@@ -285,8 +382,8 @@ def mostrar_recomendaciones(filtros: dict) -> None:
     st.dataframe(pd.DataFrame(exp["pasos"]))
     st.caption("Valores tal como los devolvió la API; el tablero no los recalcula.")
     st.caption("No disponibles en la API: " + " ".join(exp["no_disponibles"]))
-    st.caption("Las variables son las de la regla de recomendación. La API no ofrece explicación "
-               "local de las variables del modelo de demanda.")
+    st.caption("Las variables son las de la regla operativa de recomendación, no las del modelo de "
+               "demanda: la explicación del modelo está en la pestaña «Demanda prevista».")
     st.caption(xp.ALCANCE_RF015)
 
 
