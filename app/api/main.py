@@ -2,6 +2,7 @@
 import logging
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
@@ -9,7 +10,8 @@ from fastapi.responses import JSONResponse
 
 from app import evaluacion_real, servicios
 from app.api.esquemas import (ActivacionModelo, CambioEstadoAlerta, ErrorRespuesta,
-                              SolicitudFrecuencias, SolicitudPrediccion, SolicitudRecomendacion)
+                              PaginaErroresCalidad, SolicitudFrecuencias, SolicitudPrediccion,
+                              SolicitudRecomendacion)
 from app.core.config import obtener_config
 from app.core.errores import ErrorAPI, NoEncontrado, SolicitudInvalida, cuerpo_error
 from app.core.registro import configurar_logs, correlation_id
@@ -250,6 +252,30 @@ def activar_modelo(model_id: int, s: ActivacionModelo):
     if r is None:
         raise NoEncontrado("Modelo", model_id)
     return r
+
+
+# ------------------------------------------------------------------ 11. calidad de datos (G3)
+
+@v1.get("/quality/errors", tags=["calidad"], response_model=PaginaErroresCalidad,
+        responses=errores(422, 500))
+def listar_errores_calidad(lote: str = Query(..., min_length=1, max_length=120),
+                           alcance: Literal["auto", "ejecucion", "ventana"] = "auto",
+                           idruta: int | None = None,
+                           regla: str | None = Query(None, min_length=1, max_length=100),
+                           tabla_origen: str | None = Query(None, min_length=1, max_length=100),
+                           reglas_version: str | None = Query(None, min_length=1, max_length=50),
+                           causa: str | None = Query(None, min_length=1),
+                           pagina_n: int = Pagina, tamano: int = Tamano):
+    """Errores de calidad de un lote, con el evento deduplicado al que pertenece cada detección.
+
+    alcance: 'ventana' = lote exacto; 'ejecucion' = sus ventanas <lote>_NNN; 'auto' = ambos.
+    """
+    with consultar_resultados() as c:
+        filas, total = repo.errores_calidad_por_lote(
+            c, lote, alcance, {"idruta": idruta, "regla": regla, "tabla_origen": tabla_origen,
+                               "reglas_version": reglas_version, "causa": causa},
+            pagina_n, tamano)
+    return pagina(filas, total, pagina_n, tamano)
 
 
 app.include_router(v1)

@@ -285,3 +285,64 @@ def consultar(c, tabla: str, filtros: dict, desde=None, hasta=None, pagina=1, ta
     filas = c.execute(text(f"SELECT * FROM ai_frecuencias.{tabla} {where} "
                            f"ORDER BY {orden} DESC LIMIT :lim OFFSET :off"), params).mappings()
     return [dict(f) for f in filas], int(total)
+
+
+# ------------------------------------------------------------------ G3: errores de calidad por lote
+
+# Condición de lote según el alcance. Cada una va COMPLETA entre paréntesis: los filtros opcionales
+# se agregan con AND y, sin el paréntesis exterior de "auto", AND (que precede a OR) se aplicaría
+# solo a la rama por ejecución. Sufijo de ventana: "_" + tres o más dígitos ASCII (app/ingesta.py,
+# f"{lote}_{i:03d}"). Cadenas normales, no f-strings: las llaves de {3,} deben llegar tal cual.
+COND_LOTE = {
+    "ventana": "(d.lote = CAST(:lote AS text))",
+    "ejecucion": ("(starts_with(d.lote, CAST(:lote AS text))"
+                  " AND substr(d.lote, char_length(CAST(:lote AS text)) + 1) ~ '^_[0123456789]{3,}$')"),
+}
+COND_LOTE["auto"] = "(" + COND_LOTE["ventana"] + " OR " + COND_LOTE["ejecucion"] + ")"
+
+# Filtro público -> columna (constantes; el valor del usuario solo viaja como parámetro enlazado).
+FILTROS_CALIDAD = {
+    "idruta": "d.idruta",
+    "regla": "e.regla",
+    "tabla_origen": "e.tabla_origen",
+    "reglas_version": "e.reglas_version",
+    "causa": "d.causa",
+}
+
+_FROM_CALIDAD = ("FROM ai_frecuencias.data_quality_deteccion d "
+                 "JOIN ai_frecuencias.data_quality_error e ON e.id = d.evento_id")
+
+_COLUMNAS_CALIDAD = (
+    "d.id AS deteccion_id, d.evento_id AS evento_id, d.lote AS lote, d.detectado_en AS detectado_en, "
+    "d.idruta AS idruta, d.causa AS causa, d.valor_original AS valor_original, "
+    "e.tabla_origen AS tabla_origen, e.idprogramacion AS idprogramacion, e.regla AS regla, "
+    "e.reglas_version AS reglas_version, e.valor AS valor_normalizado, e.lote AS primer_lote, "
+    "e.creado_en AS primera_deteccion, (e.lote = d.lote) AS nuevo_en_lote"
+)
+
+
+def errores_calidad_por_lote(c, lote: str, alcance: str, filtros: dict | None,
+                             pagina: int = 1, tamano: int = 50) -> tuple[list[dict], int]:
+    """Detecciones de calidad de un lote (G3), paginadas, con su evento.
+
+    alcance: 'ventana' (lote exacto), 'ejecucion' (ventanas del lote: prefijo literal + '_' y 3 o
+    más dígitos ASCII) o 'auto' (ambas). El lote se usa tal cual: sin strip ni escape.
+    Devuelve (filas, total); el conteo usa exactamente el mismo FROM, JOIN y WHERE."""
+    if alcance not in COND_LOTE:
+        raise ValueError(f"alcance no válido: {alcance!r}")
+    filtros = filtros or {}
+    desconocidos = set(filtros) - set(FILTROS_CALIDAD)
+    if desconocidos:
+        raise ValueError(f"filtros no permitidos: {sorted(desconocidos)}")
+    condiciones, params = [COND_LOTE[alcance]], {"lote": lote}
+    for clave, columna in FILTROS_CALIDAD.items():
+        valor = filtros.get(clave)
+        if valor is not None:
+            condiciones.append(f"{columna} = :{clave}")
+            params[clave] = valor
+    where = "WHERE " + " AND ".join(condiciones)          # se arma UNA vez
+    total = c.execute(text(f"SELECT count(*) {_FROM_CALIDAD} {where}"), params).scalar()
+    filas = c.execute(text(f"SELECT {_COLUMNAS_CALIDAD} {_FROM_CALIDAD} {where} "
+                           "ORDER BY d.id DESC LIMIT :lim OFFSET :off"),
+                      {**params, "lim": tamano, "off": (pagina - 1) * tamano}).mappings()
+    return [dict(f) for f in filas], int(total)
