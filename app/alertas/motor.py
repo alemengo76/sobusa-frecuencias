@@ -182,16 +182,28 @@ def alt_009(cobertura: pd.DataFrame, u: dict) -> list:
 
 
 def alt_010(desempeno: pd.DataFrame, u: dict) -> list:
-    """desempeno: idruta, horizonte_min, wape_reciente, wape_referencia."""
+    """desempeno: idruta, horizonte_min, wape_reciente, wape_referencia (dos periodos predicción-real
+    del mismo modelo y versión; ver app/alertas/alt010_desde_m1.py). Columnas opcionales de evidencia:
+    model_id, model_version, n_validas_*, dias_*, reciente_/referencia_desde/hasta, umbral_version,
+    marca_agua, corte, regla. Dispara si WAPE_rec > WAPE_ref × (1 + umbral), estricto."""
     out = []
     for r in desempeno.itertuples(index=False):
         if r.wape_referencia > 0 and r.wape_reciente > r.wape_referencia * (1 + u["ALT-010"]):
             deg = r.wape_reciente / r.wape_referencia - 1
+            texto = (f"El WAPE reciente ({r.wape_reciente:.1%}) es {deg:.0%} peor que el de referencia "
+                     f"({r.wape_referencia:.1%}); umbral {u['ALT-010']:.0%}.")
+            g = r._asdict()
+            if "reciente_desde" in g:
+                texto += (f" Modelo {g['model_id']} ({g['model_version']}), ruta {r.idruta}, "
+                          f"{r.horizonte_min} min. Reciente [{g['reciente_desde']:%Y-%m-%d}, "
+                          f"{g['reciente_hasta']:%Y-%m-%d}): {g['n_validas_reciente']} observaciones válidas en "
+                          f"{g['dias_reciente']} días. Referencia (28 días anteriores) [{g['referencia_desde']:%Y-%m-%d}, "
+                          f"{g['referencia_hasta']:%Y-%m-%d}): {g['n_validas_referencia']} observaciones válidas en "
+                          f"{g['dias_referencia']} días. Umbral v{g['umbral_version']}; marca de agua "
+                          f"{g['marca_agua']}; corte de consolidación {g['corte']:%Y-%m-%d}. Regla {g['regla']}.")
             out.append(_alerta(
                 "ALT-010", r.idruta, r.wape_reciente, r.wape_referencia, u["ALT-010"],
-                deg / u["ALT-010"] - 1,
-                f"El WAPE reciente ({r.wape_reciente:.1%}) es {deg:.0%} peor que el de "
-                f"validación ({r.wape_referencia:.1%}).", horizonte_min=r.horizonte_min))
+                deg / u["ALT-010"] - 1, texto, horizonte_min=r.horizonte_min))
     return out
 
 

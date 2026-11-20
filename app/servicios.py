@@ -25,6 +25,7 @@ from app.optimizacion.parametros import TablaParametros, desde_filas
 log = logging.getLogger("sobusa.servicios")
 HISTORIA_DIAS = 63           # 9 semanas: alcanza para el promedio de 8 semanas
 BANDA_POR_DEFECTO = (-0.25, 0.30)   # PROVISIONAL hasta guardar los cuantiles de validación
+LOCK_TIMEOUT = "30s"                # espera máxima por la huella que otra ejecución está guardando
 
 
 # ------------------------------------------------------------------ predicción
@@ -140,22 +141,69 @@ def verificar_activable(c, model_id: int) -> None:
         raise Conflicto(f"No se puede activar el modelo {model_id}: {e}") from e
 
 
+def _registrar_fallo(tipo: str, parametros: dict, correlation_id: str, error: Exception) -> None:
+    """Deja la falla en una transacción NUEVA: la de la ejecución ya se revirtió (y con ella su reserva
+    de huella y sus filas). Si esto también falla, solo se registra en el log: nunca oculta el error."""
+    try:
+        with escribir() as c:
+            eid = repo.crear_ejecucion(c, tipo, parametros, correlation_id)
+            repo.cerrar_ejecucion(c, eid, "fallida", {}, f"{type(error).__name__}: {error}")
+    except Exception:  # noqa: BLE001
+        log.exception("no se pudo registrar la ejecución fallida", extra={"datos": {"tipo": tipo}})
+
+
+SQLSTATE_LOCK_TIMEOUT = "55P03"      # lock_not_available (lo que lanza lock_timeout)
+
+
+def _es_lock_timeout(e: Exception) -> bool:
+    """psycopg 3 (el controlador del proyecto) lanza psycopg.errors.LockNotAvailable con el código en
+    `sqlstate` (no tiene `pgcode`, que es de psycopg2). SQLAlchemy la envuelve en OperationalError y la
+    deja en `orig`. Se mira la excepción y su original, para reconocerla envuelta o sin envolver."""
+    return any(getattr(x, "sqlstate", None) == SQLSTATE_LOCK_TIMEOUT for x in (e, getattr(e, "orig", None)))
+
+
 def ejecutar_predicciones(idrutas, dia: datetime, horizontes, correlation_id: str) -> dict:
-    with escribir() as c:
-        modelo = repo.modelo_activo(c)
-        if modelo is None:
-            raise Conflicto("No hay un modelo activo; active uno con POST /models/{id}/activate")
-        eid = repo.crear_ejecucion(c, "prediccion", {"idrutas": idrutas, "dia": dia,
-                                                     "horizontes": horizontes}, correlation_id)
-        pred, info = predecir(c, idrutas, dia, modelo, horizontes)
-        if pred.empty:
-            repo.cerrar_ejecucion(c, eid, "fallida", info, "sin datos de demanda para el día pedido")
-            return {"execution_id": eid, "estado": "fallida", "predicciones": 0, **info}
-        contrato.validar_predicciones(pred.assign(franja_inicio=pd.to_datetime(pred.franja_inicio)))
-        n = repo.insertar_predicciones(c, eid, modelo["model_id"], pred)
-        repo.cerrar_ejecucion(c, eid, "exitosa", {"predicciones": n, "model_id": modelo["model_id"], **info})
-    log.info("predicciones guardadas", extra={"datos": {"execution_id": eid, "filas": n, **info}})
-    return {"execution_id": eid, "estado": "exitosa", "predicciones": n, **info, "_pred": pred}
+    """Predice, y guarda o reutiliza, en UNA transacción (DECISIONES.md §15):
+
+    1. predice y valida el contrato;
+    2. normaliza los valores (los que se guardan) y calcula su huella;
+    3. reserva la huella en prediction_set (con lock_timeout). Si queda como dueña, inserta todas
+       las filas y comprueba con RETURNING que entraron todas; si otra ejecución ya es dueña de esa
+       huella (mismo contenido), no inserta nada y la reutiliza;
+    4. cierra la ejecución como exitosa.
+    Si algo falla, la transacción se revierte entera (reserva, filas y ejecución) y la falla se
+    registra en una transacción aparte."""
+    parametros = {"idrutas": idrutas, "dia": dia, "horizontes": horizontes}
+    try:
+        with escribir() as c:
+            modelo = repo.modelo_activo(c)
+            if modelo is None:
+                raise Conflicto("No hay un modelo activo; active uno con POST /models/{id}/activate")
+            eid = repo.crear_ejecucion(c, "prediccion", parametros, correlation_id)
+            pred, info = predecir(c, idrutas, dia, modelo, horizontes)
+            if pred.empty:
+                repo.cerrar_ejecucion(c, eid, "fallida", info, "sin datos de demanda para el día pedido")
+                return {"execution_id": eid, "estado": "fallida", "predicciones": 0, **info}
+            contrato.validar_predicciones(pred.assign(franja_inicio=pd.to_datetime(pred.franja_inicio)))
+            normalizadas = contrato.normalizar_predicciones(pred)
+            huella = contrato.huella_predicciones(normalizadas, dia, idrutas, horizontes)
+            c.execute(text(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
+            if repo.reservar_conjunto(c, huella, eid, len(normalizadas), contrato.FORMATO_HUELLA):
+                guardadas = repo.insertar_predicciones(c, eid, normalizadas)
+                duena = eid
+            else:
+                guardadas, duena = 0, repo.duena_conjunto(c, huella)
+            resultado = {"predicciones": len(normalizadas), "predicciones_guardadas": guardadas,
+                         "execution_id_predicciones": duena, "huella": huella, "model_id": modelo["model_id"],
+                         **({"reutiliza": duena} if duena != eid else {}), **info}
+            repo.cerrar_ejecucion(c, eid, "exitosa", resultado)
+    except Exception as e:
+        _registrar_fallo("prediccion", parametros, correlation_id, e)
+        if _es_lock_timeout(e):
+            raise Conflicto("Otra ejecución está guardando estas mismas predicciones; intente de nuevo") from e
+        raise
+    log.info("predicciones guardadas", extra={"datos": {"execution_id": eid, **resultado}})
+    return {"execution_id": eid, "estado": "exitosa", **resultado}
 
 
 # ------------------------------------------------------------------ recomendación
@@ -184,23 +232,62 @@ def _frecuencia_actual(c, pred: pd.DataFrame) -> pd.DataFrame:
 
 
 def calcular_recomendaciones(c, eid: str, pred: pd.DataFrame, base_demanda: str) -> pd.DataFrame:
+    """pred: predicciones GUARDADAS (predicciones_de_ejecucion), cada una con su prediction_id."""
+    if "prediction_id" not in pred.columns or pred.prediction_id.isna().any():
+        raise RuntimeError("Las recomendaciones solo se calculan sobre predicciones guardadas (con prediction_id)")
     parametros = _parametros(c)
     faltan = set(pred.idruta) - parametros.rutas()
     if faltan:
         raise SolicitudInvalida(f"No hay parámetros operativos vigentes para las rutas {sorted(faltan)}")
     rec = recomendar(pred, parametros, _frecuencia_actual(c, pred), base_demanda)
+    _verificar_enlace(pred, rec)
     repo.insertar_recomendaciones(c, eid, rec)
     return rec
 
 
+def _verificar_enlace(pred: pd.DataFrame, rec: pd.DataFrame) -> None:
+    """Cada recomendación apunta a la predicción guardada de la que salió: exactamente una por
+    predicción, y con la misma ruta, sentido, segmento, franja y horizonte. Si no, no se guarda nada."""
+    if rec.prediction_id.isna().any():
+        raise RuntimeError("Hay recomendaciones sin su predicción guardada")
+    if (len(rec) != len(pred) or rec.prediction_id.duplicated().any()
+            or set(rec.prediction_id) != set(pred.prediction_id)):
+        raise RuntimeError("Las recomendaciones no corresponden una a una con las predicciones guardadas")
+    clave = list(contrato.CLAVE_PREDICCION)
+    m = rec[["prediction_id", *clave]].merge(pred[["prediction_id", *clave]], on="prediction_id",
+                                             suffixes=("", "_pred"), validate="one_to_one")
+    distintas = [k for k in clave if (m[k] != m[f"{k}_pred"]).any()]
+    if distintas:
+        raise RuntimeError(f"Recomendaciones enlazadas a una predicción con otro valor de {distintas}")
+
+
 def predicciones_de_ejecucion(c, eid_prediccion: str) -> pd.DataFrame:
-    filas, _ = repo.consultar(c, "prediction", {"execution_id": eid_prediccion}, tamano=100_000)
+    """Predicciones guardadas de una ejecución de predicción; si esa ejecución reutilizó las de otra
+    (mismo contenido), las de la dueña."""
+    duena = repo.ejecucion_duena(c, eid_prediccion)
+
+    if not duena:
+        raise NoEncontrado("Ejecución de predicción", eid_prediccion)
+
+    filas, total = repo.consultar(
+        c, "prediction", {"execution_id": duena}, tamano=100_000
+    )
+
+    if len(filas) != total:
+        raise RuntimeError(
+            f"Lectura incompleta de predicciones: se recuperaron "
+            f"{len(filas)} de {total} registros para la ejecución {duena}"
+        )
+
     if not filas:
         raise NoEncontrado("Ejecución de predicción", eid_prediccion)
+
     df = pd.DataFrame(filas)
     df["franja_inicio"] = pd.to_datetime(df.franja_inicio).dt.tz_localize(None)
+
     for col in ("demanda_pred", "limite_inferior", "limite_superior"):
         df[col] = df[col].astype(float)
+
     return df
 
 
@@ -275,23 +362,25 @@ def ejecutar_frecuencias(idrutas, dia: datetime, horizontes, base_demanda: str,
     """Predicción + recomendación + alertas en una sola ejecución trazable."""
     resultado = ejecutar_predicciones(idrutas, dia, horizontes, correlation_id)
     if resultado["estado"] != "exitosa":
-        return {k: v for k, v in resultado.items() if not k.startswith("_")}
+        return resultado
     parametros = {"idrutas": idrutas, "dia": dia, "base_demanda": base_demanda,
-                  "prediccion": resultado["execution_id"]}
+                  "prediccion": resultado["execution_id"],
+                  "prediccion_filas": resultado["execution_id_predicciones"]}
     try:
         with escribir() as c:
             eid = repo.crear_ejecucion(c, "frecuencias", parametros, correlation_id)
-            pred = resultado["_pred"]
+            # Se recomienda sobre lo GUARDADO (con prediction_id), no sobre lo calculado en memoria
+            pred = predicciones_de_ejecucion(c, resultado["execution_id"])
             rec = calcular_recomendaciones(c, eid, pred, base_demanda)
             n_alertas = evaluar_alertas(c, eid, pred, rec)
             resumen = {"execution_id_prediccion": resultado["execution_id"],
-                       "predicciones": resultado["predicciones"], "recomendaciones": len(rec),
+                       "execution_id_predicciones": resultado["execution_id_predicciones"],
+                       "predicciones": len(pred), "recomendaciones": len(rec),
                        "no_viables": int((~rec.es_viable).sum()), "alertas_nuevas": n_alertas}
             repo.cerrar_ejecucion(c, eid, "exitosa", resumen)
     except Exception as e:
-        # La transacción anterior se revirtió; la falla se registra en una nueva.
-        with escribir() as c:
-            eid = repo.crear_ejecucion(c, "frecuencias", parametros, correlation_id)
-            repo.cerrar_ejecucion(c, eid, "fallida", {}, str(e))
+    # La transacción anterior se revirtió; la falla se registra en una nueva.
+    # Si el registro también falla, no se oculta la excepción original.
+        _registrar_fallo("frecuencias", parametros, correlation_id, e)
         raise
     return {"execution_id": eid, "estado": "exitosa", **resumen}
