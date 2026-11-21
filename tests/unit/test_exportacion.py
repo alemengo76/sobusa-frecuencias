@@ -663,7 +663,7 @@ def test_normalizar_fin_de_linea():
     assert ex.normalizar_fin_de_linea("sin cambios") == "sin cambios"
 
 
-def test_xml_interno_del_xlsx_no_tiene_retornos_de_carro():
+def test_xml_interno_del_xlsx_no_tiene_retornos_de_carro(monkeypatch):
     import zipfile
     df = pd.DataFrame({"c\rol": ["\r=3", "a\r\nb"]}, dtype=object)
     contenido = ex.a_xlsx(df, {"clave": "\rvalor", "filtros": "x\r\ny"})
@@ -673,6 +673,14 @@ def test_xml_interno_del_xlsx_no_tiene_retornos_de_carro():
         for nombre in hojas:
             xml = z.read(nombre)
             assert b"\r" not in xml and b"&#13;" not in xml, nombre
+    # El XML base ya se interpreta con LF. El ajuste preserva valores y tipos.
+    from openpyxl import load_workbook
+    with monkeypatch.context() as m:
+        m.setattr(ex, "_normalizar_xml_xlsx", lambda datos: datos)
+        base = ex.a_xlsx(df, {"clave": "\rvalor", "filtros": "x\r\ny"})
+    hojas = lambda datos: [[[(celda.value, celda.data_type) for celda in fila] for fila in hoja]
+                            for hoja in load_workbook(io.BytesIO(datos)).worksheets]
+    assert hojas(contenido) == hojas(base)
 
 
 def test_csv_conserva_los_retornos_de_carro():
@@ -878,3 +886,317 @@ def test_importar_el_modulo_no_carga_streamlit_requests_ni_app():
     lineas = salida.stdout.strip().splitlines()
     assert lineas[0] == "[]"
     assert Path(lineas[1]).resolve() == MODULO.resolve()
+
+
+# =========================================================================================
+# Conjuntos nuevos: predicciones, recomendaciones, calidad G3, pares M1 y explicación RF-015
+# =========================================================================================
+
+ESQUEMAS = RAIZ / "app" / "api" / "esquemas.py"
+EVALUACION = RAIZ / "app" / "evaluacion_real.py"
+COMPARACION = RAIZ / "app" / "ml" / "comparacion_real.py"
+SENSIBLES = {"usuario_asignado", "comentario", "artefacto_ruta", "clave_dedup"}
+
+
+def columnas_tabla(nombre):
+    sql = DDL.read_text(encoding="utf-8")
+    m = re.search(rf"CREATE TABLE {nombre} \((.*?)\n\);", sql, re.S)
+    assert m, f"No se encontró CREATE TABLE {nombre}"
+    return re.findall(r"^\s{4}([a-z_0-9]+)\s+(?:bigserial|bigint|uuid|text|integer|smallint|numeric|"
+                      r"timestamptz|boolean)\b", m.group(1), re.M)
+
+
+def constante_ast(ruta, nombre):
+    arbol = ast.parse(ruta.read_text(encoding="utf-8"))
+    for nodo in arbol.body:
+        if isinstance(nodo, ast.Assign) and any(getattr(t, "id", None) == nombre for t in nodo.targets):
+            return ast.literal_eval(nodo.value)
+    raise AssertionError(f"No se encontró {nombre} en {ruta}")
+
+
+def campos_modelo(ruta, clase):
+    arbol = ast.parse(ruta.read_text(encoding="utf-8"))
+    for nodo in arbol.body:
+        if isinstance(nodo, ast.ClassDef) and nodo.name == clase:
+            return [n.target.id for n in nodo.body if isinstance(n, ast.AnnAssign)]
+    raise AssertionError(f"No se encontró la clase {clase}")
+
+
+def prediccion(i, **cambios):
+    fila = {"prediction_id": i, "execution_id": "00000000-0000-0000-0000-00000000000a", "idruta": 16,
+            "sentido": "CICLO", "segmento_id": "TOTAL", "franja_inicio": "2025-10-01T06:00:00-05:00",
+            "franja_minutos": 15, "horizonte_min": 60, "demanda_pred": 512.25, "limite_inferior": 410.0,
+            "limite_superior": 640.5, "nivel_intervalo": 0.8, "definicion_tiempo": "salida_programada",
+            "model_id": 2, "model_version": "gbm_fe31_20261107T065452", "feature_version": "sobusa-fe-3.1",
+            "data_cutoff": "2025-10-01T00:00:00-05:00", "generated_at": "2026-11-19T08:12:00-05:00",
+            "latency_ms": 900}
+    fila.update(cambios)
+    return fila
+
+
+def recomendacion(i, **cambios):
+    fila = {"recommendation_id": i, "execution_id": "00000000-0000-0000-0000-00000000000b",
+            "prediction_id": 100 + i, "idruta": 16, "sentido": "CICLO", "segmento_id": "TOTAL",
+            "franja_inicio": "2025-10-01T06:00:00-05:00", "horizonte_min": 60, "demanda_hora": 512.25,
+            "base_demanda": "puntual", "factor_carga_max": 0.459, "carga_max_estimada_hora": 235.12,
+            "capacidad_nominal": 55.0, "capacidad_fuente": "reporte", "ocupacion_objetivo": 0.75,
+            "capacidad_efectiva": 41.25, "buses_hora_recomendado": None, "headway_recomendado_min": None,
+            "ciclo_min": 150.0, "vehiculos_requeridos": 30, "flota_tope": 24, "buses_hora_actual": 8.0,
+            "headway_actual_min": 7.5, "delta_buses_hora": None, "es_viable": False,
+            "motivo_no_viable": "requiere 30 vehículos y el tope de flota es 24",
+            "parametros_version": "param_v2:laboral", "generated_at": "2026-11-19T08:12:00-05:00"}
+    fila.update(cambios)
+    return fila
+
+
+def deteccion(i, **cambios):
+    fila = {"deteccion_id": i, "evento_id": 7, "lote": "ingesta_20261119_001",
+            "detectado_en": "2026-11-19T02:00:00-05:00", "idruta": 2, "causa": "numeropasajeros nulo",
+            "valor_original": None, "tabla_origen": "progvehiculos", "idprogramacion": 900 + i,
+            "regla": "pasajeros_nulos", "reglas_version": "comun-1.5", "valor_normalizado": None,
+            "primer_lote": "ingesta_20261118_001", "primera_deteccion": "2026-11-18T02:00:00-05:00",
+            "nuevo_en_lote": False}
+    fila.update(cambios)
+    return fila
+
+
+def par_m1(i, **cambios):
+    fila = {"prediction_id": i, "execution_id": "00000000-0000-0000-0000-00000000000a", "model_id": 2,
+            "model_version": "gbm_fe31_20261107T065452", "feature_version": "sobusa-fe-3.1", "idruta": 16,
+            "franja_inicio": "2025-10-01T06:00:00-05:00", "fin_ventana": "2025-10-01T07:00:00-05:00",
+            "horizonte_min": 60, "data_cutoff": "2025-10-01T00:00:00-05:00",
+            "generated_at": "2026-11-19T08:12:00-05:00", "demanda_pred": 512.25, "limite_inferior": 410.0,
+            "limite_superior": 640.5, "demanda_real": None, "error": None, "dentro_intervalo": None,
+            "demanda_ingenuo_7d": 480.0, "programaciones_ventana": 12, "estado": "no_disponible",
+            "motivo": "sin_consolidar", "detalle_motivo": "la ventana termina después del corte de consolidación"}
+    fila.update(cambios)
+    return fila
+
+
+class ApiM1(ApiFalsa):
+    """Como ApiFalsa, pero cada respuesta trae la huella de la evaluación (claves_constantes)."""
+
+    def __init__(self, filas, huellas=None, **kw):
+        super().__init__(filas, columna_id="prediction_id", **kw)
+        self.huellas = huellas or {}
+
+    def __call__(self, ruta, params):
+        k = len(self.llamadas)
+        cuerpo = super().__call__(ruta, params)
+        cuerpo["parametros"] = {"reglas": "m1-1.1"}
+        if self.huellas.get(k, "h1") is not None:
+            cuerpo["huella"] = self.huellas.get(k, "h1")
+        return cuerpo
+
+
+GENERADORES = {"predicciones": prediccion, "recomendaciones": recomendacion,
+               "errores_calidad": deteccion, "pares_m1": par_m1}
+FILTROS_MINIMOS = {"errores_calidad": {"lote": "ingesta_20261119"}}
+
+
+def test_las_listas_blancas_de_prediction_y_recommendation_son_las_columnas_del_ddl():
+    assert list(ex.PREDICCIONES.columnas) == columnas_tabla("prediction")
+    assert list(ex.RECOMENDACIONES.columnas) == columnas_tabla("recommendation")
+
+
+def test_la_lista_blanca_de_calidad_son_los_campos_de_ErrorCalidad():
+    assert list(ex.ERRORES_CALIDAD.columnas) == campos_modelo(ESQUEMAS, "ErrorCalidad")
+    assert ex.ERRORES_CALIDAD.columna_id == "deteccion_id"            # no evento_id: entidades distintas
+
+
+def test_la_lista_blanca_de_pares_es_COLUMNAS_PAR_mas_el_detalle_y_los_estados_coinciden():
+    assert list(ex.PARES_M1.columnas) == constante_ast(EVALUACION, "COLUMNAS_PAR") + ["detalle_motivo"]
+    assert ex.ESTADOS_M1 == frozenset(constante_ast(COMPARACION, "ESTADOS"))
+    assert {"estado", "motivo"} <= set(ex.PARES_M1.columnas)
+
+
+def test_ningun_conjunto_exporta_campos_sensibles_o_internos():
+    for conjunto in ex.CONJUNTOS.values():
+        assert not SENSIBLES & set(conjunto.columnas), conjunto.nombre
+    assert set(ex.CONJUNTOS) == {"predicciones", "recomendaciones", "alertas", "errores_calidad", "pares_m1"}
+
+
+def test_los_filtros_de_cada_conjunto_son_los_parametros_de_su_endpoint():
+    assert ex.PREDICCIONES.filtros == {"idruta", "horizonte_min", "execution_id", "desde", "hasta"}
+    assert ex.RECOMENDACIONES.filtros == {"idruta", "horizonte_min", "es_viable", "execution_id", "desde", "hasta"}
+    assert ex.ERRORES_CALIDAD.filtros == {"lote", "alcance", "idruta", "regla", "tabla_origen",
+                                          "reglas_version", "causa"}
+    assert ex.PARES_M1.filtros == {"model_id", "execution_id", "idruta", "horizonte_min", "desde", "hasta",
+                                   "estado"}
+
+
+@pytest.mark.parametrize("nombre", ["predicciones", "recomendaciones", "errores_calidad", "pares_m1"])
+def test_cada_conjunto_lee_todas_las_paginas_y_exporta_solo_su_lista_blanca(nombre):
+    conjunto = ex.CONJUNTOS[nombre]
+    filas = [{**GENERADORES[nombre](i), "columna_extra_interna": "x"} for i in range(1, 6)]
+    api = (ApiM1(filas) if nombre == "pares_m1" else ApiFalsa(filas, columna_id=conjunto.columna_id))
+    res = ex.traer_todo(api, conjunto, FILTROS_MINIMOS.get(nombre), tamano=2)
+    assert api.paginas_pedidas() == [1, 2, 3, 1]
+    assert {r for r, _ in api.llamadas} == {conjunto.ruta}
+    assert list(res.datos.columns) == list(conjunto.columnas)
+    assert res.datos[conjunto.columna_id].tolist() == [5, 4, 3, 2, 1]
+    assert any("columna_extra_interna" in a for a in res.advertencias)
+    contenido = leer_csv(ex.a_csv(res.datos, columna_id=conjunto.columna_id))
+    assert contenido[0] == list(conjunto.columnas) and len(contenido) == 6
+    hoja = leer_xlsx(ex.a_xlsx(res.datos, ex.metadatos(res), columna_id=conjunto.columna_id))
+    assert [c.value for c in hoja["datos"][1]] == list(conjunto.columnas)
+    assert hoja["exportacion"]["B2"].value == conjunto.nombre
+
+
+def test_calidad_exige_el_lote_antes_de_llamar_a_la_api():
+    api = ApiFalsa([deteccion(1)], columna_id="deteccion_id")
+    for filtros in (None, {"alcance": "auto"}, {"lote": ""}, {"lote": None}):
+        with pytest.raises(ValueError, match="obligatorio"):
+            ex.traer_todo(api, ex.ERRORES_CALIDAD, filtros)
+    assert api.llamadas == []
+
+
+def test_calidad_valida_el_alcance_y_envia_la_causa_exacta():
+    api = ApiFalsa([deteccion(1)], columna_id="deteccion_id")
+    with pytest.raises(ValueError, match="alcance"):
+        ex.traer_todo(api, ex.ERRORES_CALIDAD, {"lote": "L", "alcance": "todo"})
+    ex.traer_todo(api, ex.ERRORES_CALIDAD, {"lote": "L", "alcance": "ventana", "causa": "numeropasajeros nulo"})
+    assert api.llamadas[0][1] == {"lote": "L", "alcance": "ventana", "causa": "numeropasajeros nulo",
+                                  "pagina": 1, "tamano": 500}
+
+
+def test_es_viable_viaja_como_texto_y_no_se_acepta_un_booleano():
+    api = ApiFalsa([recomendacion(1)], columna_id="recommendation_id")
+    with pytest.raises(ValueError, match="es_viable"):
+        ex.traer_todo(api, ex.RECOMENDACIONES, {"es_viable": False})
+    ex.traer_todo(api, ex.RECOMENDACIONES, {"es_viable": "false", "idruta": 16})
+    assert api.llamadas[0][1]["es_viable"] == "false"
+
+
+def test_pares_m1_detecta_que_la_huella_cambia_entre_paginas():
+    filas = [par_m1(i) for i in range(1, 6)]
+    with pytest.raises(ex.PaginacionInconsistente, match="huella"):
+        ex.traer_todo(ApiM1(filas, huellas={1: "h2"}), ex.PARES_M1, tamano=2)
+    with pytest.raises(ex.PaginacionInconsistente):
+        ex.traer_todo(ApiM1(filas, huellas={3: "h2"}), ex.PARES_M1, tamano=2)     # verificación de cierre
+    with pytest.raises(ex.RespuestaInvalida, match="huella"):
+        ex.traer_todo(ApiM1(filas, huellas={0: None}), ex.PARES_M1, tamano=2)
+
+
+def test_pares_m1_conserva_estado_motivo_y_faltantes_sin_convertirlos_en_cero():
+    res = ex.traer_todo(ApiM1([par_m1(1), par_m1(2, estado="valido", motivo="ok", detalle_motivo="",
+                                                  demanda_real=0.0, error=-512.25, dentro_intervalo=False)]),
+                        ex.PARES_M1)
+    filas = leer_csv(ex.a_csv(res.datos))
+    encabezado = filas[0]
+    por_id = {f[0]: dict(zip(encabezado, f, strict=True)) for f in filas[1:]}
+    assert por_id["1"]["demanda_real"] == "" and por_id["1"]["motivo"] == "sin_consolidar"
+    assert por_id["2"]["demanda_real"] == "0.0" and por_id["2"]["estado"] == "valido"
+    with pytest.raises(ValueError, match="estado"):
+        ex.traer_todo(ApiM1([par_m1(1)]), ex.PARES_M1, {"estado": "otro"})
+    api = ApiM1([par_m1(1), par_m1(2, estado="valido")])
+    res = ex.traer_todo(api, ex.PARES_M1, {"estado": "valido", "model_id": 2})
+    assert api.llamadas[0][1] == {"estado": "valido", "model_id": "2", "pagina": 1, "tamano": 500}
+    assert res.datos["prediction_id"].tolist() == [2]
+
+
+def test_formulas_en_campos_de_texto_de_calidad_se_neutralizan():
+    res = ex.traer_todo(ApiFalsa([deteccion(1, causa="=HIPERVINCULO(\"x\")", valor_original="+57 300")],
+                                 columna_id="deteccion_id"), ex.ERRORES_CALIDAD, {"lote": "L"})
+    fila = dict(zip(*leer_csv(ex.a_csv(res.datos))[:2], strict=True))
+    assert fila["causa"].startswith("'=") and fila["valor_original"] == "'+57 300"
+    hoja = leer_xlsx(ex.a_xlsx(res.datos))["datos"]
+    assert all(c.data_type != "f" for fila in hoja.iter_rows() for c in fila)
+
+
+def test_un_valor_no_finito_en_un_conjunto_nuevo_impide_el_archivo():
+    res = ex.traer_todo(ApiFalsa([prediccion(1, demanda_pred=float("inf"))], columna_id="prediction_id"),
+                        ex.PREDICCIONES)
+    with pytest.raises(ex.ErrorExportacion, match="infinito"):
+        ex.a_csv(res.datos, columna_id="prediction_id")
+    with pytest.raises(ex.ErrorExportacion):
+        ex.a_xlsx(res.datos, columna_id="prediction_id")
+
+
+def test_limite_de_filas_tambien_aplica_a_los_conjuntos_nuevos():
+    assert ex.LIMITE_FILAS_POR_DEFECTO == 10_000
+
+    def api(ruta, params):
+        return {"datos": [prediccion(i) for i in range(1, 501)],
+                "paginacion": {"pagina": 1, "tamano": 500, "total": 10_001, "paginas": 21}}
+    with pytest.raises(ex.LimiteExcedido):
+        ex.traer_todo(api, ex.PREDICCIONES)
+
+
+def test_paginacion_inconsistente_en_recomendaciones_no_entrega_archivo():
+    api = ApiFalsa([recomendacion(i) for i in range(1, 6)], columna_id="recommendation_id",
+                   mutaciones={1: lambda a: a.filas.update({99: recomendacion(99)})})
+    with pytest.raises(ex.PaginacionInconsistente):
+        ex.traer_todo(api, ex.RECOMENDACIONES, tamano=2)
+
+
+def test_un_conjunto_con_filtro_obligatorio_desconocido_no_se_puede_declarar():
+    with pytest.raises(ValueError, match="obligatorio"):
+        ex.Conjunto("x", "x", "id", ("id",), frozenset({"a"}), obligatorios=frozenset({"b"}))
+
+
+# ---------------------------------------------------------------------- explicación (RF-015)
+
+def explicacion(**cambios):
+    x = {"prediction_id": 771201, "execution_id": "00000000-0000-0000-0000-00000000000a", "model_id": 2,
+         "model_version": "gbm_fe31_20261107T065452", "feature_version": "sobusa-fe-3.1",
+         "artefacto_sha256": "37b5" + "0" * 60, "scikit_learn": "1.9.1", "idruta": 16,
+         "franja_inicio": "2025-10-01T06:00:00-05:00", "horizonte_min": 60,
+         "data_cutoff": "2025-10-01T00:00:00-05:00", "demanda_pred": 512.25, "estado": "reconstruida_y_verificada",
+         "advertencia": "Explicación reconstruida, no garantizada", "metodo": "TreeSHAP", "escala": "log",
+         "referencia_log": 5.1, "referencia_pasajeros": 164.0, "prediccion_log": 6.24,
+         "prediccion_pasajeros": 512.25,
+         "aportes": [{"variable": "y_media_4_semanas", "valor": 498.0, "valor_modelo": 498.0, "aporte_log": 0.91,
+                      "factor": 2.48},
+                     {"variable": "tipo_dia", "valor": "laboral", "valor_modelo": 0.0, "aporte_log": 0.05,
+                      "factor": 1.05},
+                     {"variable": "marca_calendario", "valor": None, "valor_modelo": None, "aporte_log": -0.02,
+                      "factor": 0.98}],
+         "verificaciones": {}, "importancia_global_artefacto": {}}
+    x.update(cambios)
+    return x
+
+
+def reloj_fijo():
+    return datetime(2026, 11, 20, 20, 0, tzinfo=timezone.utc)
+
+
+def test_la_explicacion_valida_se_exporta_una_fila_por_variable_con_metadatos():
+    df, meta = ex.tabla_explicacion(explicacion(), reloj=reloj_fijo)
+    assert list(df.columns) == list(ex.COLUMNAS_APORTES)
+    assert df["variable"].tolist() == ["y_media_4_semanas", "tipo_dia", "marca_calendario"]
+    assert meta["prediction_id"] == "771201" and meta["model_version"] == "gbm_fe31_20261107T065452"
+    assert meta["variables"] == "3" and meta["generado_en"] == "2026-11-20T20:00:00+00:00"
+    filas = leer_csv(ex.a_csv(df))
+    assert filas[3] == ["marca_calendario", "", "", "-0.02", "0.98"]        # faltante como celda vacía
+    libro = leer_xlsx(ex.a_xlsx(df, meta))
+    assert {fila[0].value for fila in libro["exportacion"].iter_rows(min_row=2)} >= {"prediction_id", "model_id"}
+
+
+@pytest.mark.parametrize("cambios, error", [
+    ({"estado": "parcial"}, ex.ErrorExportacion),
+    ({"aportes": []}, ex.RespuestaInvalida),
+    ({"aportes": [{"variable": "a", "valor": 1}]}, ex.RespuestaInvalida),
+    ({"aportes": [{"variable": "a", "valor": 1, "valor_modelo": 1, "aporte_log": 0.1, "factor": 1.1}] * 2},
+     ex.RespuestaInvalida),
+], ids=["estado_no_verificado", "sin_aportes", "aporte_incompleto", "variable_repetida"])
+def test_una_explicacion_no_valida_no_se_exporta(cambios, error):
+    with pytest.raises(error):
+        ex.tabla_explicacion(explicacion(**cambios))
+
+
+def test_la_explicacion_sin_campos_de_identificacion_no_se_exporta():
+    x = explicacion()
+    del x["model_version"]
+    with pytest.raises(ex.RespuestaInvalida, match="model_version"):
+        ex.tabla_explicacion(x)
+
+
+def test_la_explicacion_neutraliza_formulas_y_rechaza_no_finitos():
+    df, _ = ex.tabla_explicacion(explicacion(aportes=[
+        {"variable": "=x", "valor": "@SUMA(A1)", "valor_modelo": 1.0, "aporte_log": 0.1, "factor": 1.1}]))
+    assert leer_csv(ex.a_csv(df))[1][:2] == ["'=x", "'@SUMA(A1)"]
+    df, _ = ex.tabla_explicacion(explicacion(aportes=[
+        {"variable": "a", "valor": 1.0, "valor_modelo": 1.0, "aporte_log": float("inf"), "factor": 1.1}]))
+    with pytest.raises(ex.ErrorExportacion):
+        ex.a_csv(df)

@@ -10,6 +10,8 @@ from decimal import Decimal
 import pandas as pd
 from sqlalchemy import text
 
+from app.core.errores import Conflicto
+
 # ------------------------------------------------------------------ ejecuciones
 
 def crear_ejecucion(c, tipo: str, parametros: dict, correlation_id: str) -> str:
@@ -45,12 +47,17 @@ def modelo_activo(c) -> dict | None:
     return dict(f) if f else None
 
 
-def activar_modelo(c, model_id: int, usuario: str, motivo: str) -> dict:
+def activar_modelo(c, model_id: int, usuario: str, motivo: str) -> dict | None:
     """Activa un modelo y retira el anterior, dejando bitácora (permite reversión)."""
+    # Espacio SOBUSA 5438, operación 1: serializa activaciones, incluso sin activo previo.
+    # PostgreSQL libera este bloqueo al confirmar o revertir la transacción.
+    c.execute(text("SELECT pg_advisory_xact_lock(5438, 1)"))
     objetivo = c.execute(text("SELECT * FROM model_registry WHERE model_id = :m FOR UPDATE"),
                          {"m": model_id}).mappings().first()
     if objetivo is None:
         return None
+    if objetivo["estado"] == "rechazado":
+        raise Conflicto(f"No se puede activar el modelo {model_id}: está rechazado")
     anterior = c.execute(text("SELECT model_id FROM model_registry WHERE estado = 'activo' FOR UPDATE")
                          ).scalar()
     if anterior is not None and anterior != model_id:

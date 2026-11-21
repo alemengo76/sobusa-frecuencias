@@ -80,6 +80,20 @@ def marca_agua(c) -> dict | None:
     return dict(f) if f else None
 
 
+def completitud_por_dia(c, idrutas, desde, hasta) -> dict:
+    existe = c.execute(text(
+        "SELECT to_regclass('ai_frecuencias.completitud_ruta_dia') IS NOT NULL"
+    )).scalar()
+    if existe is not True:
+        return {}
+    filas = c.execute(text("""
+        SELECT idruta, fecha, estado
+        FROM ai_frecuencias.completitud_ruta_dia
+        WHERE idruta = ANY(:r) AND fecha BETWEEN :desde AND :hasta
+        """), {"r": idrutas, "desde": desde.date(), "hasta": hasta.date()})
+    return {(r, fecha): estado for r, fecha, estado in filas}
+
+
 def ejecuciones_prediccion_de_modelo(c, model_id: int) -> list[dict]:
     """Ejecuciones de predicción exitosas en que `model_id` era el modelo ACTIVO. Incluye las que
     cayeron al respaldo (sus filas llevan el model_id de la línea base). Las ejecuciones anteriores al

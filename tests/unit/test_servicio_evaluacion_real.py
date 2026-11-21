@@ -1,6 +1,7 @@
 """M1: servicio evaluar() y consultas de solo lectura, con la base simulada (unittest.mock)."""
 import re
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -28,6 +29,7 @@ def _pred_df(filas):
 
 
 def _correr(filas, marca=MARCA, **kw):
+    kw.setdefault("completitud", {(16, DIA.date()): "completo"})
     with patch(f"{M}.obtener_config", return_value=_cfg()), \
          patch(f"{M}.lr.contar_predicciones", return_value=len(filas)), \
          patch(f"{M}.lr.predicciones", return_value=_pred_df(filas)) as lp, \
@@ -51,6 +53,11 @@ def test_evaluar_completo():
     assert rutas == [16] and ini == DIA + pd.Timedelta(hours=8) - pd.Timedelta(days=7)
     assert fin == DIA + pd.Timedelta(hours=10)
     assert lp.call_args.kwargs["model_id"] == 7
+
+
+def test_api_m1_sin_evidencia_no_certifica_un_dia_con_franjas():
+    resultado, _, _ = _correr([pred()], completitud=None)
+    assert resultado["pares"].motivo.tolist() == ["completitud_desconocida"]
 
 
 def test_ejecucion_que_reutiliza_lee_las_filas_de_la_duena():
@@ -135,7 +142,7 @@ def test_horario_propio_y_del_activo_para_la_linea_base():
     assert set(h.model_id) == {1, 2} and avisos == []
     assert fuente[2]["origen"] == "propio" and fuente[1]["origen"] == "modelo_activo"
     assert fuente[1]["artefacto_sha256"] == "abc"
-    cargar.assert_called_with("/m/gbm.pkl", "abc")          # hash verificado al cargar
+    cargar.assert_called_with(str(Path("/m") / "gbm.pkl"), "abc")
 
 
 def test_sin_artefacto_utilizable_queda_aviso_y_no_se_asume_cero():
@@ -159,7 +166,7 @@ def test_evaluar_aplica_el_horario_y_lo_registra():
          patch(f"{M}.lr.contar_predicciones", return_value=1), \
          patch(f"{M}.lr.predicciones", return_value=_pred_df([pred(limite_inferior=0.0)])), \
          patch(f"{M}.lr.marca_agua", return_value={"ultima_actualizacion": MARCA, "lote": "L"}):
-        r = er.evaluar(MagicMock(), model_id=7)
+        r = er.evaluar(MagicMock(), model_id=7, completitud={(16, DIA.date()): "completo"})
     assert r["pares"].motivo.tolist() == ["cero_operativo"]
     assert r["parametros"]["horario_operacion"][7]["artefacto_sha256"] == "x"
     assert r["parametros"]["reglas"] == "m1-1.1"
