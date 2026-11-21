@@ -16,7 +16,15 @@ from app.api import main  # noqa: E402
 from app.core.errores import Conflicto  # noqa: E402
 from tests.unit.test_servicio_prediccion import BASE, DIA, entorno, repo_falso  # noqa: E402,F401
 
-cliente = TestClient(main.app, raise_server_exceptions=False)
+cliente = TestClient(main.app, raise_server_exceptions=False,
+                     headers={"Authorization": "Bearer token-pruebas-admin"})
+
+
+@pytest.fixture(autouse=True)
+def credencial_de_prueba(monkeypatch):
+    monkeypatch.setenv("SOBUSA_ADMIN_TOKEN", "token-pruebas-admin")
+
+
 CUERPO = {"idrutas": [2, 16, 21], "dia": DIA.strftime("%Y-%m-%d"), "horizontes": [30, 60, 120]}
 
 

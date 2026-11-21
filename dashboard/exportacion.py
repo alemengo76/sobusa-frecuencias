@@ -61,6 +61,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from zipfile import ZipFile
 
 import numpy as np
 import pandas as pd
@@ -114,7 +115,12 @@ class ErrorConsulta(ErrorExportacion):
 
 @dataclass(frozen=True)
 class Conjunto:
-    """Describe un conjunto exportable: ruta de la API, identificador, lista blanca y filtros."""
+    """Describe un conjunto exportable: ruta de la API, identificador, lista blanca y filtros.
+
+    ``obligatorios``: filtros sin los cuales no se consulta (p. ej. ``lote`` en calidad G3).
+    ``claves_constantes``: claves de la respuesta (fuera de ``datos``) que deben ser idénticas en todas
+    las páginas, p. ej. la ``huella`` de M1: si cambia, los datos de base cambiaron durante la lectura.
+    """
     nombre: str
     ruta: str
     columna_id: str
@@ -122,6 +128,8 @@ class Conjunto:
     filtros: frozenset[str]
     valores_permitidos: Mapping[str, frozenset[str]] = field(default_factory=dict)
     advertencia_filtro_fecha: str | None = None
+    obligatorios: frozenset[str] = frozenset()
+    claves_constantes: tuple[str, ...] = ()
 
     def __post_init__(self):
         if len(set(self.columnas)) != len(self.columnas):
@@ -132,6 +140,8 @@ class Conjunto:
             raise ValueError(f"{self.nombre}: la lista blanca incluye columnas excluidas")
         if PARAMETROS_RESERVADOS & self.filtros:
             raise ValueError(f"{self.nombre}: un filtro usa un nombre reservado")
+        if not self.obligatorios <= self.filtros:
+            raise ValueError(f"{self.nombre}: un filtro obligatorio no está entre los filtros")
 
 
 # Valores de los CHECK de ai_frecuencias.alert (migrations/sql/0001_esquema.sql).
@@ -151,8 +161,68 @@ ALERTAS = Conjunto(
     advertencia_filtro_fecha=ADVERTENCIA_FRANJA_NULA,
 )
 
-# Predicciones y recomendaciones se agregan después de P1 (trazabilidad de predicciones).
-CONJUNTOS: dict[str, Conjunto] = {ALERTAS.nombre: ALERTAS}
+# Todas las columnas de ai_frecuencias.prediction (migrations/sql/0001_esquema.sql; la 0008 solo cambia
+# restricciones). Ninguna es personal ni interna del despliegue.
+PREDICCIONES = Conjunto(
+    nombre="predicciones",
+    ruta="predictions",
+    columna_id="prediction_id",
+    columnas=("prediction_id", "execution_id", "idruta", "sentido", "segmento_id", "franja_inicio",
+              "franja_minutos", "horizonte_min", "demanda_pred", "limite_inferior", "limite_superior",
+              "nivel_intervalo", "definicion_tiempo", "model_id", "model_version", "feature_version",
+              "data_cutoff", "generated_at", "latency_ms"),
+    filtros=frozenset({"idruta", "horizonte_min", "execution_id", "desde", "hasta"}),
+)
+
+# Todas las columnas de ai_frecuencias.recommendation. es_viable viaja como 'true'/'false'.
+RECOMENDACIONES = Conjunto(
+    nombre="recomendaciones",
+    ruta="recommendations",
+    columna_id="recommendation_id",
+    columnas=("recommendation_id", "execution_id", "prediction_id", "idruta", "sentido", "segmento_id",
+              "franja_inicio", "horizonte_min", "demanda_hora", "base_demanda", "factor_carga_max",
+              "carga_max_estimada_hora", "capacidad_nominal", "capacidad_fuente", "ocupacion_objetivo",
+              "capacidad_efectiva", "buses_hora_recomendado", "headway_recomendado_min", "ciclo_min",
+              "vehiculos_requeridos", "flota_tope", "buses_hora_actual", "headway_actual_min",
+              "delta_buses_hora", "es_viable", "motivo_no_viable", "parametros_version", "generated_at"),
+    filtros=frozenset({"idruta", "horizonte_min", "es_viable", "execution_id", "desde", "hasta"}),
+    valores_permitidos={"es_viable": frozenset({"true", "false"})},
+)
+
+# Campos de ErrorCalidad (app/api/esquemas.py). deteccion_id y evento_id son entidades distintas:
+# varias detecciones (una por lote) pueden pertenecer al mismo evento.
+ALCANCES_CALIDAD = frozenset({"auto", "ejecucion", "ventana"})
+ERRORES_CALIDAD = Conjunto(
+    nombre="errores_calidad",
+    ruta="quality/errors",
+    columna_id="deteccion_id",
+    columnas=("deteccion_id", "evento_id", "lote", "detectado_en", "idruta", "causa", "valor_original",
+              "tabla_origen", "idprogramacion", "regla", "reglas_version", "valor_normalizado",
+              "primer_lote", "primera_deteccion", "nuevo_en_lote"),
+    filtros=frozenset({"lote", "alcance", "idruta", "regla", "tabla_origen", "reglas_version", "causa"}),
+    valores_permitidos={"alcance": ALCANCES_CALIDAD},
+    obligatorios=frozenset({"lote"}),
+)
+
+# Pares de M1 (app/evaluacion_real.py: COLUMNAS_PAR + detalle_motivo), con estado y motivo de cada par.
+ESTADOS_M1 = frozenset({"valido", "no_disponible", "incompleto_cuarentena", "sin_correspondencia",
+                        "duplicado", "inconsistente"})
+PARES_M1 = Conjunto(
+    nombre="pares_m1",
+    ruta="predictions/accuracy/pairs",
+    columna_id="prediction_id",
+    columnas=("prediction_id", "execution_id", "model_id", "model_version", "feature_version", "idruta",
+              "franja_inicio", "fin_ventana", "horizonte_min", "data_cutoff", "generated_at",
+              "demanda_pred", "limite_inferior", "limite_superior", "demanda_real", "error",
+              "dentro_intervalo", "demanda_ingenuo_7d", "programaciones_ventana", "estado", "motivo",
+              "detalle_motivo"),
+    filtros=frozenset({"model_id", "execution_id", "idruta", "horizonte_min", "desde", "hasta", "estado"}),
+    valores_permitidos={"estado": ESTADOS_M1},
+    claves_constantes=("huella",),
+)
+
+CONJUNTOS: dict[str, Conjunto] = {c.nombre: c for c in (PREDICCIONES, RECOMENDACIONES, ALERTAS,
+                                                         ERRORES_CALIDAD, PARES_M1)}
 
 
 @dataclass(frozen=True)
@@ -201,6 +271,9 @@ def _validar_filtros(conjunto: Conjunto, filtros: Mapping[str, object] | None) -
             raise ValueError(f"Tipo no admitido para '{nombre}': {type(valor).__name__}")
     if "desde" in fechas and "hasta" in fechas and fechas["desde"] >= fechas["hasta"]:
         raise ValueError("'desde' debe ser anterior a 'hasta'")
+    faltan = sorted(n for n in conjunto.obligatorios if not enviados.get(n))
+    if faltan:
+        raise ValueError(f"Falta el filtro obligatorio de {conjunto.nombre}: {', '.join(faltan)}")
     return enviados
 
 
@@ -209,7 +282,7 @@ def _es_id_valido(valor: object) -> bool:
 
 
 def _leer_pagina(get, conjunto: Conjunto, filtros: dict[str, str], pagina: int,
-                 tamano: int) -> tuple[list[Mapping], int]:
+                 tamano: int) -> tuple[list[Mapping], int, dict]:
     params = {**filtros, "pagina": pagina, "tamano": tamano}
     try:
         respuesta = get(conjunto.ruta, params)
@@ -231,7 +304,12 @@ def _leer_pagina(get, conjunto: Conjunto, filtros: dict[str, str], pagina: int,
             raise RespuestaInvalida(f"Página {pagina}: una fila no es un objeto JSON")
         if not _es_id_valido(fila.get(conjunto.columna_id)):
             raise RespuestaInvalida(f"Página {pagina}: una fila no tiene '{conjunto.columna_id}' válido")
-    return datos, total
+    constantes = {}
+    for clave in conjunto.claves_constantes:
+        if clave not in respuesta:
+            raise RespuestaInvalida(f"Página {pagina}: falta '{clave}' en la respuesta")
+        constantes[clave] = respuesta[clave]
+    return datos, total, constantes
 
 
 def traer_todo(get: Callable[[str, Mapping[str, object]], Mapping],
@@ -253,7 +331,7 @@ def traer_todo(get: Callable[[str, Mapping[str, object]], Mapping],
     enviados = _validar_filtros(conjunto, filtros)
     iniciado_en = reloj()
 
-    datos, total = _leer_pagina(get, conjunto, enviados, 1, tamano)
+    datos, total, constantes = _leer_pagina(get, conjunto, enviados, 1, tamano)
     solicitudes = 1
     if total > limite_filas:
         raise LimiteExcedido(f"La exportación tendría {total} filas y el límite es {limite_filas}; "
@@ -272,10 +350,13 @@ def traer_todo(get: Callable[[str, Mapping[str, object]], Mapping],
         raise PaginacionInconsistente("Identificadores repetidos en la página 1")
 
     for p in range(2, paginas + 1):
-        datos_p, total_p = _leer_pagina(get, conjunto, enviados, p, tamano)
+        datos_p, total_p, constantes_p = _leer_pagina(get, conjunto, enviados, p, tamano)
         solicitudes += 1
         if total_p != total:
             raise PaginacionInconsistente(f"El total cambió de {total} a {total_p} en la página {p}")
+        if constantes_p != constantes:
+            raise PaginacionInconsistente(f"Cambió {', '.join(conjunto.claves_constantes)} en la página "
+                                          f"{p}: los datos de base cambiaron durante la lectura")
         if len(datos_p) != esperado(p):
             raise PaginacionInconsistente(f"La página {p} trajo {len(datos_p)} filas y se esperaban "
                                           f"{esperado(p)}")
@@ -288,9 +369,10 @@ def traer_todo(get: Callable[[str, Mapping[str, object]], Mapping],
 
     # Verificación de cierre, también con una sola página (o ninguna fila): la página 1 debe traer
     # el mismo total y los mismos identificadores, en el mismo orden, que en la primera lectura.
-    datos_v, total_v = _leer_pagina(get, conjunto, enviados, 1, tamano)
+    datos_v, total_v, constantes_v = _leer_pagina(get, conjunto, enviados, 1, tamano)
     solicitudes += 1
-    if total_v != total or [f[conjunto.columna_id] for f in datos_v] != ids_pagina_1:
+    if (total_v != total or constantes_v != constantes
+            or [f[conjunto.columna_id] for f in datos_v] != ids_pagina_1):
         raise PaginacionInconsistente("Los datos cambiaron durante la exportación (la página 1 "
                                       "ya no coincide); vuelva a intentarlo")
 
@@ -312,6 +394,55 @@ def traer_todo(get: Callable[[str, Mapping[str, object]], Mapping],
     return ResultadoExportacion(conjunto=conjunto.nombre, datos=df, total=total,
                                 solicitudes=solicitudes, filtros=enviados, iniciado_en=iniciado_en,
                                 terminado_en=reloj(), advertencias=tuple(advertencias))
+
+
+# ------------------------------------------------------------------ explicación individual (RF-015)
+
+ESTADO_EXPLICACION_VALIDA = "reconstruida_y_verificada"
+COLUMNAS_APORTES = ("variable", "valor", "valor_modelo", "aporte_log", "factor")
+CAMPOS_META_EXPLICACION = ("prediction_id", "execution_id", "model_id", "model_version", "feature_version",
+                           "artefacto_sha256", "scikit_learn", "idruta", "franja_inicio", "horizonte_min",
+                           "data_cutoff", "demanda_pred", "estado", "metodo", "escala", "referencia_log",
+                           "referencia_pasajeros", "prediccion_log", "prediccion_pasajeros", "advertencia")
+
+
+def tabla_explicacion(explicacion: Mapping[str, object], *,
+                      reloj: Callable[[], datetime] = _ahora_utc) -> tuple[pd.DataFrame, dict[str, str]]:
+    """Aportes TreeSHAP de una explicación válida: una fila por variable, y metadatos con la predicción
+    y el modelo. Solo acepta el estado 'reconstruida_y_verificada': nunca exporta una explicación
+    parcial. No recalcula nada: copia lo que devolvió la API."""
+    if not isinstance(explicacion, Mapping):
+        raise RespuestaInvalida("La explicación no es un objeto JSON")
+    if explicacion.get("estado") != ESTADO_EXPLICACION_VALIDA:
+        raise ErrorExportacion("Solo se exportan explicaciones reconstruidas y verificadas por la API")
+    faltan = [c for c in CAMPOS_META_EXPLICACION if c not in explicacion]
+    if faltan:
+        raise RespuestaInvalida(f"Faltan campos en la explicación: {', '.join(faltan)}")
+    aportes = explicacion.get("aportes")
+    if not isinstance(aportes, list) or not aportes:
+        raise RespuestaInvalida("La explicación no trae aportes")
+    registros = []
+    vistos = set()
+    for i, aporte in enumerate(aportes, start=1):
+        if not isinstance(aporte, Mapping):
+            raise RespuestaInvalida(f"El aporte {i} no es un objeto JSON")
+        faltan = [c for c in COLUMNAS_APORTES if c not in aporte]
+        if faltan:
+            raise RespuestaInvalida(f"Al aporte {i} le faltan: {', '.join(faltan)}")
+        if aporte["variable"] in vistos:
+            raise RespuestaInvalida(f"Variable repetida en los aportes: {aporte['variable']}")
+        vistos.add(aporte["variable"])
+        registros.append([aporte[c] for c in COLUMNAS_APORTES])
+    df = pd.DataFrame(registros, columns=list(COLUMNAS_APORTES), dtype=object)
+    meta = {"conjunto": "explicacion_rf015"}
+    for campo in CAMPOS_META_EXPLICACION:
+        valor = explicacion[campo]
+        meta[campo] = "" if valor is None else str(valor)
+    meta["variables"] = str(len(df))
+    meta["generado_en"] = reloj().isoformat()
+    meta["limitacion"] = ("Copia de la respuesta de GET /predictions/{id}/explanation; el tablero no "
+                          "calcula SHAP. Explica la predicción del GBM, no la regla de frecuencias.")
+    return df, meta
 
 
 def metadatos(resultado: ResultadoExportacion) -> dict[str, str]:
@@ -433,6 +564,26 @@ def _donde(fila: int, ident: object) -> str:
     return f"fila {fila}" + (f", id {ident}" if ident is not None else "")
 
 
+def _normalizar_xml_xlsx(contenido: bytes) -> bytes:
+    """Corrige CRLF reintroducido por el escritor XML de texto en Windows."""
+    with ZipFile(io.BytesIO(contenido)) as original:
+        cambios = {}
+        for nombre in original.namelist():
+            if nombre.startswith("xl/worksheets/") and nombre.endswith(".xml"):
+                xml = original.read(nombre)
+                if b"\r" in xml:
+                    cambios[nombre] = xml.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+        if not cambios:
+            return contenido
+        buffer = io.BytesIO()
+        with ZipFile(buffer, "w") as nuevo:
+            for entrada in original.infolist():
+                datos = (cambios[entrada.filename] if entrada.filename in cambios
+                         else original.read(entrada))
+                nuevo.writestr(entrada, datos)
+        return buffer.getvalue()
+
+
 def a_xlsx(df: pd.DataFrame, metadatos: Mapping[str, object] | None = None, *,
            columna_id: str | None = None) -> bytes:
     """XLSX con la hoja 'datos' y, si hay metadatos, la hoja 'exportacion'.
@@ -458,4 +609,4 @@ def a_xlsx(df: pd.DataFrame, metadatos: Mapping[str, object] | None = None, *,
                          _valor_xlsx(_a_texto(str(valor)), "valor", 0, None)])
     buffer = io.BytesIO()
     libro.save(buffer)
-    return buffer.getvalue()
+    return _normalizar_xml_xlsx(buffer.getvalue())

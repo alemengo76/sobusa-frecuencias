@@ -163,6 +163,21 @@ def test_no_se_activa_un_gbm_que_no_carga(entorno):
         servicios.verificar_activable(MagicMock(), 7)
 
 
+def test_modelo_rechazado_no_carga_el_artefacto():
+    modelo = {"model_id": 9, "estado": "rechazado", "hiperparametros": {"metodo": "gbm_fe31"}}
+    with patch.object(servicios.repo, "listar_modelos", return_value=[modelo]), \
+         patch.object(servicios.modelo_gbm, "cargar") as cargar:
+        with pytest.raises(Conflicto, match="rechazado"):
+            servicios.verificar_activable(MagicMock(), 9)
+    cargar.assert_not_called()
+
+
+def test_modelo_retirado_con_artefacto_valido_puede_reactivarse(entorno):
+    modelo = {**entorno["gbm"], "estado": "retirado"}
+    with repo_falso(entorno, BASE), patch.object(servicios.repo, "listar_modelos", return_value=[modelo]):
+        servicios.verificar_activable(MagicMock(), modelo["model_id"])
+
+
 def test_recomendaciones_con_factores_medidos(entorno):
     with repo_falso(entorno, entorno["gbm"]):
         pred, _ = servicios.predecir(MagicMock(), RUTAS, DIA, entorno["gbm"], H)

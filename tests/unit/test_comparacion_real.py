@@ -50,6 +50,26 @@ def test_real_es_suma_de_las_franjas_de_la_ventana():
     assert r.programaciones_ventana.to_dict() == {30: 2, 60: 4, 120: 8}
 
 
+@pytest.mark.parametrize(("estado", "motivo", "real"), [
+    ("completo", "ok", 100), ("parcial", "carga_parcial", None),
+    (None, "completitud_desconocida", None),
+])
+def test_m1_no_confunde_un_hueco_con_una_carga_parcial(estado, motivo, real):
+    p = pred(demanda_pred=120, limite_superior=150)
+    datos = pd.DataFrame([{
+        "idruta": 16, "franja_inicio": p["franja_inicio"], "pasajeros": 100,
+        "programaciones": 1,
+    }])
+    certificadas = {(16, DIA.date()): estado} if estado else {}
+    pares = cr.emparejar(pd.DataFrame([p]), datos, MARCA, 3, completitud=certificadas)
+    assert pares.iloc[0].motivo == motivo
+    assert cr.metricas_grupo(pares)["n_validas"] == (1 if real is not None else 0)
+    if real is None:
+        assert pd.isna(pares.iloc[0].demanda_real)
+    else:
+        assert pares.iloc[0].demanda_real == real
+
+
 def test_ventana_que_cruza_medianoche_exige_ambos_dias():
     p = correr([pred(franja_inicio=DIA + pd.Timedelta(hours=23, minutes=30), horizonte_min=60)])
     assert p.loc[0, "estado"] == "incompleto_cuarentena" and p.loc[0, "motivo"] == "dia_sin_datos"

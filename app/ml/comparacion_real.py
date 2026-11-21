@@ -81,7 +81,7 @@ AGRUPACIONES = ("idruta", "horizonte_min", "execution_id", "dia", "hora", "tipo_
 
 # ----------------------------------------------------------------- real por ventana
 
-def real_por_ventana(franjas: pd.DataFrame, claves: pd.DataFrame) -> pd.DataFrame:
+def real_por_ventana(franjas: pd.DataFrame, claves: pd.DataFrame, completitud=None) -> pd.DataFrame:
     """Demanda real de cada (idruta, franja_inicio, horizonte_min) de `claves`.
 
     franjas: idruta, franja_inicio (naive, hora de Bogotá), pasajeros (NaN = sin medición),
@@ -93,7 +93,7 @@ def real_por_ventana(franjas: pd.DataFrame, claves: pd.DataFrame) -> pd.DataFram
     base = claves[cols].drop_duplicates().reset_index(drop=True)
     if base.empty:
         return base.assign(demanda_real=pd.Series(dtype=float), programaciones_ventana=0,
-                           franjas_sin_medicion=0, dia_cargado=False)
+                           franjas_sin_medicion=0, dia_cargado=False, parcial=False, desconocido=False)
     f = franjas[["idruta", "franja_inicio", "pasajeros", "programaciones"]].copy()
     f["franja_inicio"] = pd.to_datetime(f.franja_inicio)
     f["pasajeros"] = pd.to_numeric(f.pasajeros, errors="coerce").astype(float)
@@ -108,11 +108,22 @@ def real_por_ventana(franjas: pd.DataFrame, claves: pd.DataFrame) -> pd.DataFram
         f.rename(columns={"franja_inicio": "franja"}), on=["idruta", "franja"], how="left")
     exp["sin_medicion"] = exp.programaciones.notna() & exp.pasajeros.isna()
     exp["dia_ok"] = [(int(r), d) in dias for r, d in zip(exp.idruta, exp.franja.dt.normalize(), strict=True)]
+    # None conserva las llamadas puras legadas. La API pasa siempre un mapa explícito.
+    exp["parcial"] = exp["desconocido"] = False
+    if completitud is not None:
+        estado = pd.Series([
+            completitud.get((int(r), d.date())) for r, d in zip(exp.idruta, exp.franja, strict=True)
+        ], index=exp.index)
+        exp["dia_ok"] = estado.eq("completo")
+        exp["parcial"] = estado.eq("parcial")
+        exp["desconocido"] = ~estado.isin(("completo", "parcial"))
     g = exp.groupby("i")
     out = base.copy()
     out["programaciones_ventana"] = g.programaciones.sum().reindex(out.index).fillna(0).astype(int)
     out["franjas_sin_medicion"] = g.sin_medicion.sum().reindex(out.index).astype(int)
     out["dia_cargado"] = g.dia_ok.all().reindex(out.index).astype(bool)
+    out["parcial"] = g.parcial.any().reindex(out.index).astype(bool)
+    out["desconocido"] = g.desconocido.any().reindex(out.index).astype(bool)
     suma = g.pasajeros.sum(min_count=0).reindex(out.index)
     medible = out.dia_cargado & out.franjas_sin_medicion.eq(0)
     out["demanda_real"] = suma.where(medible).astype(float)
@@ -169,6 +180,7 @@ ESTADO_DE_MOTIVO = {
     "duplicado_con_valores_distintos": "inconsistente",
     "repeticion": "duplicado", "pronostico_anterior": "duplicado",
     "sin_marca_agua": "no_disponible", "sin_consolidar": "no_disponible",
+    "carga_parcial": "no_disponible", "completitud_desconocida": "no_disponible",
     "dia_sin_datos": "incompleto_cuarentena", "franja_sin_medicion": "incompleto_cuarentena",
     "sin_servicio": "sin_correspondencia", "fuera_de_horario": "sin_correspondencia",
     "cero_operativo": "valido", "ok": "valido",
@@ -238,7 +250,7 @@ def _normalizar(pred: pd.DataFrame) -> pd.DataFrame:
 
 
 def emparejar(pred: pd.DataFrame, franjas: pd.DataFrame, marca_agua,
-              margen_dias: int, horario: pd.DataFrame | None = None) -> pd.DataFrame:
+              margen_dias: int, horario: pd.DataFrame | None = None, *, completitud=None) -> pd.DataFrame:
     """Una fila por predicción con su estado, motivo, demanda_real y el real del ingenuo de 7 días.
 
     pred: columnas COLUMNAS_PREDICCION (+ registro_version, registro_feature_version opcionales).
@@ -266,10 +278,14 @@ def emparejar(pred: pd.DataFrame, franjas: pd.DataFrame, marca_agua,
     validas_h = p.horizonte_min.isin(HORIZONTES) & (p.franja_inicio.dt.floor("15min") == p.franja_inicio)
     claves = p.loc[validas_h, ["idruta", "franja_inicio", "horizonte_min"]].astype(
         {"idruta": int, "horizonte_min": int})
-    real = real_por_ventana(franjas, claves)
+    real = real_por_ventana(franjas, claves, completitud)
     p = p.merge(real.astype({"idruta": "Int64", "horizonte_min": "Int64"}),
                 on=["idruta", "franja_inicio", "horizonte_min"], how="left")
 
+    vivas = motivo.isna()
+    motivo.loc[vivas & p.parcial.fillna(False).astype(bool)] = "carga_parcial"
+    vivas = motivo.isna()
+    motivo.loc[vivas & p.desconocido.fillna(False).astype(bool)] = "completitud_desconocida"
     vivas = motivo.isna()
     motivo.loc[vivas & ~p.dia_cargado.fillna(False).astype(bool)] = "dia_sin_datos"
     vivas = motivo.isna()
@@ -293,7 +309,7 @@ def emparejar(pred: pd.DataFrame, franjas: pd.DataFrame, marca_agua,
     # Ingenuo de 7 días: el real (consolidado y medible) de la misma ventana una semana antes.
     # Misma regla: sin salidas cuenta como 0 solo si el origen de hace 7 días era operativo.
     ing = claves.assign(franja_inicio=claves.franja_inicio - pd.Timedelta(days=DIAS_INGENUO))
-    ri = real_por_ventana(franjas, ing)
+    ri = real_por_ventana(franjas, ing, completitud)
     ri = ri.assign(franja_inicio=ri.franja_inicio + pd.Timedelta(days=DIAS_INGENUO))[
         ["idruta", "franja_inicio", "horizonte_min", "demanda_real", "programaciones_ventana"]].rename(
         columns={"demanda_real": "demanda_ingenuo_7d", "programaciones_ventana": "_prog_ing"})
@@ -305,7 +321,7 @@ def emparejar(pred: pd.DataFrame, franjas: pd.DataFrame, marca_agua,
     p["demanda_ingenuo_7d"] = p.demanda_ingenuo_7d.where(p.estado.eq("valido") & usable)
     p = p.drop(columns="_prog_ing")
     p["programaciones_ventana"] = p.programaciones_ventana.astype("Int64")
-    return p.drop(columns=["franjas_sin_medicion", "dia_cargado"]).sort_values(
+    return p.drop(columns=["franjas_sin_medicion", "dia_cargado", "parcial", "desconocido"]).sort_values(
         ["model_id", "idruta", "horizonte_min", "franja_inicio", "prediction_id"]).reset_index(drop=True)
 
 

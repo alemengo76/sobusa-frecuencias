@@ -59,6 +59,6 @@ def consultar_resultados():
     """
     with motor_escritura().connect() as c:
         with c.begin():
-            c.exec_driver_sql("SET TRANSACTION READ ONLY")
+            c.exec_driver_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             c.execute(text("SET LOCAL search_path TO ai_frecuencias"))
             yield c
