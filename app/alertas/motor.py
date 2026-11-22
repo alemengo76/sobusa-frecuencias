@@ -122,7 +122,7 @@ def alt_005_007(obs: pd.DataFrame, u: dict) -> list:
                 "ALT-005", r.idruta, r.demanda_real, r.demanda_pred, u["ALT-005"],
                 -rel / u["ALT-005"] - 1,
                 f"Se registraron {r.demanda_real:.0f} subidas frente a {r.demanda_pred:.0f} "
-                f"previstas ({rel:.0%}).", r.franja_inicio, r.horizonte_min))
+                f"previstas ({rel:.0%}).", r.franja_inicio, r.horizonte_min, severidad="media"))
         elif abs(rel) > u["ALT-007"]:
             out.append(_alerta(
                 "ALT-007", r.idruta, r.demanda_real, r.demanda_pred, u["ALT-007"],
