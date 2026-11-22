@@ -4,3 +4,7 @@
 # Los scripts que corren dentro de Linux (Docker) deben quedar con fin de línea LF también en Windows
 *.sh text eol=lf
 Dockerfile text eol=lf
+
+# Las huellas FE 3.1 se verifican sobre los bytes originales en Windows y Linux.
+app/fe31/conjunto_entrenamiento.py text eol=lf
+app/fe31/reglas_comunes.py text eol=lf

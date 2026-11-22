@@ -26,3 +26,26 @@ respaldos/
 
 # Ruedas descargadas/construidas para instalar sin red (docs/WHEELHOUSE.md): se regeneran, no se versionan
 wheelhouse/
+
+# Datos, credenciales y artefactos de origen externo
+.env.*
+!.env.example
+/.local/
+/historico_privado/
+/modelos/
+/artefactos/
+/datos/
+/docs/evidencias/
+/docs/resultados_*/
+/consolidado_v1/
+/saneamiento_publico/
+*.pkl
+*.pickle
+*.joblib
+*.pt
+*.pth
+lgbm_s[0-4].txt
+*.bundle
+*.zip
+.venv-*/
+.ipynb_checkpoints/
