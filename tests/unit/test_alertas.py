@@ -51,6 +51,30 @@ def test_alt_005_y_007():
     assert [a["codigo"] for a in motor.alt_005_007(obs, U)] == ["ALT-005", "ALT-007"]
 
 
+@pytest.mark.parametrize(("demanda_real", "codigo", "severidad"), [
+    (140, "ALT-007", "media"),
+    (61, "ALT-007", "media"),
+    (60, "ALT-005", "media"),
+    (20, "ALT-005", "media"),
+    (0, "ALT-005", "media"),
+    (200, "ALT-007", "alta"),
+])
+def test_alt_005_severidad_fija_y_regresion_alt_007(demanda_real, codigo, severidad):
+    assert U["ALT-005"] == 0.40
+    obs = pd.DataFrame([{"idruta": 21, "franja_inicio": pd.Timestamp("2025-03-04 07:00"),
+                         "horizonte_min": 60, "demanda_pred": 100, "demanda_real": demanda_real}])
+    alertas = motor.alt_005_007(obs, U)
+    esperadas = [(codigo, severidad)]
+    assert [(a["codigo"], a["severidad"]) for a in alertas] == esperadas
+
+
+def test_alt_001_conserva_el_escalado_generico():
+    pred = pd.DataFrame({"idruta": [16, 16], "franja_inicio": pd.to_datetime(["2025-03-04 07:00"] * 2),
+                         "horizonte_min": [60, 120], "demanda_pred": [150, 200],
+                         "demanda_referencia": [100, 100]})
+    assert [a["severidad"] for a in motor.alt_001(pred, U)] == ["media", "alta"]
+
+
 # ---------------------------------------------------------------- ALT-006 (contrato alt006-v2)
 
 M = pd.Timestamp("2025-12-20 12:00")            # marca de agua de prueba; consolidado: salida < 12-17 12:00
