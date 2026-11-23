@@ -292,3 +292,20 @@ def listar_errores_calidad(lote: str = Query(..., min_length=1, max_length=120),
 
 
 app.include_router(v1)
+
+
+# El canal historico se monta solo en la copia local y sin DSN empresarial.
+def _montar_candidato_local():
+    import os
+
+    if os.environ.get("SOBUSA_CANDIDATO_LOCAL") != "1":
+        return
+    cfg = obtener_config()
+    if cfg.database_url_read or cfg.database_url_write:
+        raise RuntimeError("El canal candidato local requiere iniciar sin DSN")
+    from app.api.candidatos import router
+
+    app.include_router(router)
+
+
+_montar_candidato_local()

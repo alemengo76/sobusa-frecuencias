@@ -49,3 +49,15 @@ lgbm_s[0-4].txt
 *.zip
 .venv-*/
 .ipynb_checkpoints/
+
+# Insumos privados del candidato
+/artefactos/
+/historico_privado/
+/privado/
+/dependencias/ruedas/
+/.venv-backend/
+/.venv-worker/
+/modelos/*.pkl
+/modelos/gbm_fe31_*.json
+*.pt
+*.parquet
