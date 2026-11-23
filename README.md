@@ -9,8 +9,11 @@ La edición de demostración contiene la API FastAPI, las migraciones, la lógic
 | Recomendaciones y alertas | [optimización](app/optimizacion) y [estado de las alertas](docs/ALERTAS.md) |
 | Análisis exploratorio y gráficos | [EDA y visualizaciones sintéticas](eda/README.md) |
 | Modelo original SOBUSA v1.0 | [Instalación y ejemplos de Python, FastAPI y Jupyter](README_INFERENCIA.md) |
+| Notebook científico | [Metodología, evaluación p25 e inferencia reproducible](notebooks/modelo_original/SOBUSA_v1_modelo_original.ipynb) |
 
 El modelo original combina la media de cinco semillas RRAP v4 con la media de cinco semillas LightGBM L3, con pesos fijos de 50/50. Cubre las rutas 2, 16 y 21 y ventanas de 30, 60 y 120 minutos. La API empresarial conserva su registro y `gbm_fe31` cuando ese modelo está activo. El candidato queda deshabilitado por defecto y requiere selección explícita. Para ejecutar el candidato con los pesos congelados hay que suministrar el motor y el paquete privado autorizado.
+
+El notebook científico documenta el corte D−3, las arquitecturas, las métricas y la comparación retrospectiva. Las celdas públicas muestran los resultados globales aprobados. El EDA histórico detallado y la ejecución con los diez modelos requieren los insumos privados indicados en el propio notebook.
 
 ## Instalación y pruebas sin PostgreSQL
 
