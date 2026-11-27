@@ -41,3 +41,104 @@ jobs:
         with:
           name: reporte-pruebas
           path: reporte-pruebas.xml
+
+  postgres-14:
+    name: PostgreSQL 14 (${{ matrix.suite }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: integracion
+            database: sobusa_desechable_suite_ci
+            tests: >-
+              tests/integracion/test_alertas_ciclo_postgres.py
+              tests/integracion/test_alertas_conectadas_postgres.py
+              tests/integracion/test_alt009_postgres.py
+            expected: 30
+          - suite: e2e
+            database: sobusa_desechable_suite_e2e_ci
+            tests: tests/integracion/test_recorrido_automatico_e2e.py
+            expected: 1
+    env:
+      SOBUSA_BD_DESECHABLE: "1"
+    steps:
+      - name: Descargar punta del PR
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias congeladas
+        run: |
+          python -m venv "$RUNNER_TEMP/sobusa-venv"
+          source "$RUNNER_TEMP/sobusa-venv/bin/activate"
+          python -m pip install -r docker/requisitos-construccion.txt
+          python -m pip install --no-build-isolation -c docker/requisitos-congelados.txt ".[dev]"
+          python scripts/verificar_wheelhouse.py --instalados docker/requisitos-congelados.txt docker/requisitos-construccion.txt
+          python -m pip check
+
+      - name: Instalar PostgreSQL 14
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-14 postgresql-client-14
+
+      - name: Preparar instancia por socket y ejecutar pruebas
+        env:
+          TEST_DATABASE: ${{ matrix.database }}
+          TEST_FILES: ${{ matrix.tests }}
+        run: |
+          source "$RUNNER_TEMP/sobusa-venv/bin/activate"
+          export PATH="/usr/lib/postgresql/14/bin:$PATH"
+          cluster=$(mktemp -d /tmp/sobusa-pg14.XXXXXXXX)
+          socket="$cluster/socket"
+          port=55414
+          mkdir "$socket"
+          initdb -D "$cluster/data" -U postgres --auth-local=trust --auth-host=scram-sha-256
+          trap 'pg_ctl -D "$cluster/data" -m fast -w stop' EXIT
+          pg_ctl -D "$cluster/data" -l "$RUNNER_TEMP/postgres-14.log" \
+            -o "-c listen_addresses= -k $socket -p $port" -w start
+
+          psql -X -v ON_ERROR_STOP=1 -h "$socket" -p "$port" -U postgres -d postgres \
+            -c 'SELECT version(), inet_server_addr() IS NULL AS socket_unix' | tee version-postgres-14.txt
+          test "$(psql -XAt -h "$socket" -p "$port" -U postgres -d postgres \
+            -c "SELECT current_setting('server_version_num')::int / 10000 = 14 AND inet_server_addr() IS NULL")" = t
+          bash scripts/preparar_bd_suite_alertas.sh "$PWD" "$socket" "$port" \
+            "$TEST_DATABASE" "$RUNNER_TEMP/sobusa-venv"
+
+          export DATABASE_URL_WRITE="postgresql+psycopg://sobusa_escritor@/$TEST_DATABASE?host=$socket&port=$port"
+          export DATABASE_URL_READ="postgresql+psycopg://sobusa_lector@/$TEST_DATABASE?host=$socket&port=$port"
+          export SOBUSA_E2E_ADMIN_URL="postgresql+psycopg://postgres@/$TEST_DATABASE?host=$socket&port=$port"
+          read -r -a tests <<< "$TEST_FILES"
+          python -m pytest -rs "${tests[@]}" --junitxml=reporte-postgres-14.xml
+
+      - name: Verificar que se ejecutaron todas las pruebas
+        env:
+          TEST_COUNT: ${{ matrix.expected }}
+        run: |
+          python - <<'PY'
+          import os
+          import xml.etree.ElementTree as ET
+
+          cases = ET.parse("reporte-postgres-14.xml").findall(".//testcase")
+          expected = int(os.environ["TEST_COUNT"])
+          skipped = [case.attrib["name"] for case in cases if case.find("skipped") is not None]
+          if len(cases) != expected or skipped:
+              raise SystemExit(f"Se esperaban {expected} pruebas, se registraron {len(cases)}. Omitidas: {skipped}")
+          PY
+
+      - name: Guardar reporte y versión del servidor
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-postgres-14-${{ matrix.suite }}
+          path: |
+            reporte-postgres-14.xml
+            version-postgres-14.txt
+            ${{ runner.temp }}/postgres-14.log
