@@ -26,3 +26,4 @@ respaldos/
 
 # Ruedas descargadas/construidas para instalar sin red (docs/WHEELHOUSE.md): se regeneran, no se versionan
 wheelhouse/
+deploy/programador/programador.env

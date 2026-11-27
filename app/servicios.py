@@ -11,9 +11,10 @@ import pandas as pd
 from sqlalchemy import text
 
 from app.alertas import motor
+from app.calidad.cuarentena import REGLAS_VERSION
 from app.core.config import obtener_config
 from app.core.errores import Conflicto, NoEncontrado, SolicitudInvalida
-from app.db import repositorio as repo
+from app.db import lectura_real, repositorio as repo
 from app.db.conexion import escribir
 from app.fe31 import FEATURE_VERSION as FEATURE_VERSION_GBM
 from app.fe31.viajes import a_formato_fe
@@ -295,6 +296,28 @@ def predicciones_de_ejecucion(c, eid_prediccion: str) -> pd.DataFrame:
 
 # ------------------------------------------------------------------ alertas
 
+def _evaluar_incompletitud(c, eid: str, idrutas: list[int], u: dict, versiones: dict) -> int:
+    marca = lectura_real.marca_agua(c)
+    if marca is None or pd.isna(marca["ultima_actualizacion"]):
+        return 0
+    dias_revision = obtener_config().dias_revision
+    ultima_actualizacion = pd.Timestamp(marca["ultima_actualizacion"])
+    hasta = (ultima_actualizacion - pd.Timedelta(days=dias_revision)).normalize()
+    desde = hasta - pd.Timedelta(days=1)
+    viajes = repo.viajes_fuente(c, idrutas, desde, hasta)
+    if viajes.empty:
+        return 0
+    detecciones = pd.read_sql(
+        text(motor.CONSULTA_DETECCIONES_ALT009 + " AND e.idprogramacion = ANY(:ids)"),
+        c,
+        params={"tabla_origen": motor.TABLA_ORIGEN_ALT009, "regla": motor.REGLA_SIN_CONTEO,
+                "reglas_version": REGLAS_VERSION, "ids": viajes.idprogramacion.unique().tolist()},
+    )
+    cobertura = motor.cobertura_alt_009(viajes, detecciones, ultima_actualizacion, dias_revision)
+    nuevas = motor.deduplicar(motor.alt_009(cobertura, u), repo.claves_alertas_abiertas(c))
+    return repo.insertar_alertas(c, eid, nuevas, versiones)
+
+
 def evaluar_alertas(c, eid: str, pred: pd.DataFrame, rec: pd.DataFrame) -> int:
     umbrales, versiones = repo.umbrales_vigentes(c)
     u = {**motor.umbrales_por_defecto(), **umbrales}
@@ -315,7 +338,24 @@ def evaluar_alertas(c, eid: str, pred: pd.DataFrame, rec: pd.DataFrame) -> int:
     nuevas = motor.deduplicar(nuevas, repo.claves_alertas_abiertas(c))
     repo.insertar_alertas(c, eid, nuevas, versiones)
     notificar(c, [a for a in nuevas if a["severidad"] == "alta"])
-    return len(nuevas)
+
+    if pred.empty:
+        return len(nuevas)
+    error_incompletitud = None
+    try:
+        with c.begin_nested():
+            try:
+                incompletas = _evaluar_incompletitud(c, eid, pred.idruta.unique().tolist(), u, versiones)
+            except Exception as error:
+                error_incompletitud = error
+                raise
+    except Exception as error:
+        # Un fallo de apertura o cierre del savepoint pertenece a la transacción principal.
+        if error is not error_incompletitud or c.invalidated or not c.in_transaction():
+            raise
+        log.exception("Falló la evaluación de incompletitud ALT-009", extra={"execution_id": eid})
+        return len(nuevas)
+    return len(nuevas) + incompletas
 
 
 def notificar(c, alertas: list[dict]) -> None:

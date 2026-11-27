@@ -1,3 +1,5 @@
+from datetime import date
+
 import pandas as pd
 import pytest
 
@@ -87,8 +89,11 @@ def _sal(filas):
         fechasalida=lambda d: pd.to_datetime(d.fechasalida), fechainicio=lambda d: pd.to_datetime(d.fechainicio))
 
 
-def _clase(fila):
-    return motor.clasificar_salidas(_sal([fila]), U["ALT-006"], M, 3).clase.iloc[0]
+COBERTURA = {(2, date(2025, 12, 10)), (2, date(2025, 12, 17)), (21, date(2025, 12, 10))}
+
+
+def _clase(fila, cobertura=COBERTURA):
+    return motor.clasificar_salidas(_sal([fila]), U["ALT-006"], M, 3, cobertura).clase.iloc[0]
 
 
 @pytest.mark.parametrize("inicio, clase", [
@@ -99,10 +104,22 @@ def _clase(fila):
     ("2025-12-10 08:00", "tardia"),                   # 120 min: todavía tardía
     ("2025-12-10 08:01", "desfase_extremo"),
     ("2025-12-10 03:59", "desfase_extremo"),          # -121 min
-    (None, "ausente"),                                # día consolidado sin inicio registrado
+    (None, "ausente"),                                # consolidado, sin inicio y CON evidencia de cobertura
 ])
 def test_alt_006_clases_por_desfase(inicio, clase):
     assert _clase((1, 2, "2025-12-10 06:00", inicio, "N", "S")) == clase
+
+
+def test_alt_006_sin_inicio_y_sin_evidencia_de_cobertura_es_indeterminada():
+    """fechainicio nulo solo indica que no hay evidencia de salida: sin evidencia de que la fuente
+    cubre ese alcance no es una ausencia y no alerta."""
+    assert _clase((1, 2, "2025-12-10 06:00", None, "N", "S"), cobertura=None) == "indeterminada"
+    assert _clase((1, 2, "2025-12-10 06:00", None, "N", "S"), cobertura={(16, date(2025, 12, 10))}) \
+        == "indeterminada"                                              # la evidencia es de otra ruta
+    assert _clase((1, 2, "2025-12-10 06:00", "2025-12-10 06:20", "N", "S"), cobertura=None) == "tardia"
+    assert motor.alt_006(_sal([(21, 21, "2025-12-10 06:00", None, "N", "N")]), U, M, 3) == []
+    d = motor.diagnostico_alt_006(_sal([(21, 21, "2025-12-10 06:00", None, "N", "N")]), U, M, 3)
+    assert d["conteo_por_clase"] == {"indeterminada": 1} and d["indeterminada"][0]["idprogramacion"] == 21
 
 
 def test_alt_006_tolerancia_no_vencida_no_se_evalua_con_o_sin_inicio():
@@ -154,7 +171,10 @@ def test_alt_006_una_alerta_por_franja_con_evidencia():
               (14, 2, "2025-12-10 06:14", None, "S", "N"),                    # cancelada
               (15, 2, "2025-12-10 06:30", "2025-12-10 06:50", "N", "S"),     # otra franja
               (16, 16, "2025-12-10 06:00", "2025-12-10 06:30", "N", "S")])   # otra ruta
-    a = motor.alt_006(s, U, M, 3)
+    sin_evidencia = motor.alt_006(s, U, M, 3)                       # la tardía alerta igual
+    x0 = next(x for x in sin_evidencia if x["idruta"] == 2 and x["franja_inicio"] == pd.Timestamp("2025-12-10 06:00"))
+    assert "2 programaciones evaluadas" in x0["explicacion"] and "sin inicio registrado" not in x0["explicacion"]
+    a = motor.alt_006(s, U, M, 3, COBERTURA)
     assert len(a) == 3 and len({x["clave_dedup"] for x in a}) == 3
     x = [x for x in a if x["idruta"] == 2 and x["franja_inicio"] == pd.Timestamp("2025-12-10 06:00")][0]
     assert x["severidad"] == "alta" and x["valor_observado"] == 20.0 and x["valor_esperado"] == 0
@@ -167,7 +187,7 @@ def test_alt_006_una_alerta_por_franja_con_evidencia():
 
 
 def test_alt_006_solo_ausencias_sin_valor_observado():
-    a = motor.alt_006(_sal([(21, 21, "2025-12-10 06:00", None, "N", "N")]), U, M, 3)
+    a = motor.alt_006(_sal([(21, 21, "2025-12-10 06:00", None, "N", "N")]), U, M, 3, COBERTURA)
     assert len(a) == 1 and a[0]["valor_observado"] is None and a[0]["puntuacion_anomalia"] == 1.0
 
 

@@ -140,12 +140,17 @@ RUTAS_ALT006 = (2, 16, 21)
 CLASES_EVALUADAS = ("tardia", "a_tiempo", "ausente")
 
 
-def clasificar_salidas(salidas: pd.DataFrame, tolerancia_min: float, marca, dias_revision: int) -> pd.DataFrame:
+def clasificar_salidas(salidas: pd.DataFrame, tolerancia_min: float, marca, dias_revision: int,
+                       evidencia_cobertura=None) -> pd.DataFrame:
     """Una clase por programación, en este orden:
     duplicada (todas las apariciones del id) · estado_invalido (cancelada fuera de S/N o sin salida) · futura ·
     cancelada · no_evaluable (salida + tolerancia > marca) · desfase_extremo (|d| > 120 min) ·
     tardia (d > tolerancia) · a_tiempo · no_evaluable (sin inicio y salida >= marca - dias_revision) ·
-    ausente (sin inicio y salida < marca - dias_revision).
+    ausente / indeterminada (sin inicio y salida < marca - dias_revision).
+    Un `fechainicio` nulo, por sí solo, solo indica que no hay evidencia de salida. Es «ausente» únicamente
+    si (idruta, fecha de salida) está en `evidencia_cobertura` (conjunto de pares con evidencia de que la
+    fuente cubre ese alcance); sin esa evidencia es «indeterminada» y no alerta. Hoy no existe una fuente
+    de esa evidencia: por defecto (None) todas las ausencias quedan indeterminadas.
     La referencia temporal es la marca de agua, nunca el reloj del sistema. `finalizado` no se usa."""
     s = salidas[salidas.idruta.isin(RUTAS_ALT006)].copy()
     s["fechasalida"] = pd.to_datetime(s.fechasalida)
@@ -170,14 +175,19 @@ def clasificar_salidas(salidas: pd.DataFrame, tolerancia_min: float, marca, dias
         ["duplicada", "estado_invalido", "futura", "cancelada", "no_evaluable", "desfase_extremo",
          "tardia", "a_tiempo", "no_evaluable"],
         default="ausente")
+    cubierto = pd.Series(
+        [(int(r), d.date()) in (evidencia_cobertura or set()) for r, d in zip(s.idruta, s.fechasalida, strict=True)],
+        index=s.index, dtype=bool) if len(s) else pd.Series(dtype=bool)
+    s.loc[s.clase.eq("ausente") & ~cubierto, "clase"] = "indeterminada"
     return s
 
 
-def alt_006(salidas: pd.DataFrame, u: dict, marca, dias_revision: int) -> list:
+def alt_006(salidas: pd.DataFrame, u: dict, marca, dias_revision: int, evidencia_cobertura=None) -> list:
     """salidas: idruta, idprogramacion, fechasalida (programada), fechainicio (real), cancelada (S/N).
-    Una alerta por ruta y franja de 15 min con al menos una programación tardía o sin inicio registrado."""
+    Una alerta por ruta y franja de 15 min con al menos una programación tardía, o ausente con evidencia
+    de cobertura de la fuente (ver clasificar_salidas)."""
     tol = u["ALT-006"]
-    c = clasificar_salidas(salidas, tol, marca, dias_revision)
+    c = clasificar_salidas(salidas, tol, marca, dias_revision, evidencia_cobertura)
     corte = pd.Timestamp(marca) - pd.Timedelta(days=int(dias_revision))
     out = []
     for (ruta, franja), g in c.groupby(["idruta", "franja_inicio"], sort=True):
@@ -205,9 +215,9 @@ def alt_006(salidas: pd.DataFrame, u: dict, marca, dias_revision: int) -> list:
     return out
 
 
-def diagnostico_alt_006(salidas: pd.DataFrame, u: dict, marca, dias_revision: int) -> dict:
+def diagnostico_alt_006(salidas: pd.DataFrame, u: dict, marca, dias_revision: int, evidencia_cobertura=None) -> dict:
     """Conteo por clase y casos para diagnóstico. No escribe en ninguna tabla."""
-    c = clasificar_salidas(salidas, u["ALT-006"], marca, dias_revision)
+    c = clasificar_salidas(salidas, u["ALT-006"], marca, dias_revision, evidencia_cobertura)
     cols = ["idruta", "idprogramacion", "fechasalida", "fechainicio", "desfase_min"]
 
     def filas(clase, extra=()):
@@ -220,6 +230,7 @@ def diagnostico_alt_006(salidas: pd.DataFrame, u: dict, marca, dias_revision: in
             "conteo_por_clase": {k: int(v) for k, v in c.clase.value_counts().sort_index().items()},
             "desfase_extremo": filas("desfase_extremo"),
             "duplicada": filas("duplicada"),
+            "indeterminada": filas("indeterminada"),
             "estado_invalido": filas("estado_invalido", ("cancelada",)),
             "finalizado_por_clase": {f"{k[0]}|{k[1]}": int(v) for k, v in
                                      c.groupby(["clase", c.finalizado.astype("string").fillna("<nulo>")]).size().items()}
@@ -227,18 +238,22 @@ def diagnostico_alt_006(salidas: pd.DataFrame, u: dict, marca, dias_revision: in
 
 
 def alt_008(consolidado: pd.DataFrame, u: dict) -> list:
-    """consolidado: idruta, periodo, subidas_consolidado (Extreme), subidas_viajes."""
+    """consolidado: idruta, periodo, subidas_consolidado (Extreme), subidas_viajes y, opcional,
+    inicio_periodo (Timestamp) y evidencia (texto). Con inicio_periodo la alerta queda identificada por
+    ruta y período (una por período); sin él, por ruta, como antes."""
     out = []
     for r in consolidado.itertuples(index=False):
         if r.subidas_viajes <= 0:
             continue
         dif = (r.subidas_consolidado - r.subidas_viajes) / r.subidas_viajes
         if abs(dif) > u["ALT-008"]:
+            extra = getattr(r, "evidencia", None)
             out.append(_alerta(
                 "ALT-008", r.idruta, r.subidas_consolidado, r.subidas_viajes, u["ALT-008"],
                 abs(dif) / u["ALT-008"] - 1,
                 f"El consolidado de {r.periodo} suma {r.subidas_consolidado:,.0f} subidas y los "
-                f"viajes {r.subidas_viajes:,.0f} ({dif:+.0%})."))
+                f"viajes {r.subidas_viajes:,.0f} ({dif:+.0%})." + (f" {extra}" if extra else ""),
+                getattr(r, "inicio_periodo", None)))
     return out
 
 
