@@ -195,13 +195,13 @@ Si falta cualquiera, el resultado es `no_evaluable / politica_operativa_no_confi
 
 Busqué un procedimiento del equipo para obtener y cargar esta evidencia en el repositorio, en DECISIONES, en los documentos del proyecto y en la copia de GitHub de tu equipo. **No existe.** DECISIONES solo menciona un «procedimiento privado» sin describirlo, y ninguna migración crea la tabla. Por eso entrego tres piezas:
 
-- **El mecanismo:** `app/calidad/completitud.py` (regla `completitud-v1`). Calcula el estado de cada ruta y día de los últimos 35 días consolidados, que cubren la ventana de ALT-010. Para marcar un día **completo** exige cuatro condiciones:
+- **El mecanismo:** `app/calidad/completitud.py` (regla `completitud-v2`). Calcula el estado de cada ruta y día de los últimos 35 días consolidados, que cubren la ventana de ALT-010. Para marcar un día **completo** exige cuatro condiciones:
   1. el día está consolidado;
   2. la última ingesta registrada terminó exitosa, completa y con consulta válida;
-  3. **la referencia externa:** el número de programaciones que tiene Extreme para esa ruta y día (`progvehiculos`, leído con el usuario de solo lectura con `fuentes_extreme.ProgramacionesPorDia`) es igual al número de viajes copiados en `viaje_fuente`;
+  3. **la referencia externa:** los identificadores de programación de esa ruta y día (`progvehiculos`, consultado en solo lectura mediante `fuentes_extreme.ProgramacionesPorDia`) son únicos y coinciden con los de `viaje_fuente`;
   4. la cobertura de conteos de los viajes elegibles es mayor o igual al umbral vigente de ALT-009 (0,90).
 
-  Con 1 a 3 pero sin 4, o con copia incompleta, el día queda `parcial`. Sin consolidar, sin una ingesta buena o sin programaciones en la referencia, queda `desconocido`. Cada fila guarda su evidencia: la referencia y los conteos, la cobertura, la marca, el corte, la ingesta y los motivos.
+  Con 1 a 3 pero sin 4, o con copia incompleta, el día queda `parcial`. Sin consolidar, sin una ingesta válida o sin identificadores de referencia válidos, queda `desconocido`. La evidencia guarda la referencia, el total de identificadores faltantes y sobrantes, la cobertura, la marca, el corte, la ingesta y los motivos.
 
   **Límite:** «completo» significa que nuestra copia coincide con lo que Extreme tiene programado, no que Extreme haya registrado todo lo que ocurrió (DECISIONES §16.6).
 - **La propuesta de tabla:** `propuestas/migraciones/0010_completitud_ruta_dia.*`, **sin aplicar**. Crea dos tablas: `completitud_ruta_dia`, con el estado vigente, y `completitud_ruta_dia_historial`, donde cada cambio guarda antes la versión anterior.
@@ -294,7 +294,7 @@ Busqué un procedimiento del equipo para obtener y cargar esta evidencia en el r
 | ALT-004 | Igual | En el recorrido automático: 9 alertas (ocupación del 17 %) | Igual |
 | ALT-009 incompletitud | Funciona hoy en el cálculo de frecuencias, sin notificar | En el recorrido automático: 1 alerta (cobertura del 75 %) | Aprobar la equivalencia Crítica = `alta` (DECISIONES §16.5) |
 | ALT-009 retraso | Conectada al ciclo y al verificador. Sin política responde `no_evaluable` | En el recorrido automático, sin ninguna ingesta, el verificador abrió 3 alertas (rutas 2, 16 y 21) | Política validada (`ALT009_RETRASO_*`: apertura, vencimiento, tolerancia, versión, inicio), el mecanismo para verificar reintentos (P5), la severidad y el despliegue del programador |
-| ALT-005 / ALT-007 | Conectadas. Sin la tabla de completitud responden `no_evaluable` | Con la propuesta 0010 aplicada en el entorno aislado: 3 alertas ALT-005 de punta a punta | Aprobar la migración 0010, el criterio `completitud-v1` y el despliegue del programador |
+| ALT-005 / ALT-007 | Conectadas. Sin la tabla de completitud responden `no_evaluable` | Con la propuesta 0010 aplicada en el entorno aislado: 3 alertas ALT-005 de punta a punta | Aprobar la migración 0010, el criterio `completitud-v2` y el despliegue del programador |
 | ALT-010 | Igual | Con evidencia sintética de completitud (prueba con rollback) | Igual que ALT-005 |
 | ALT-006 | Salidas tardías con hora real: conectada al ciclo, lista con los datos que ya trae la ingesta | En el recorrido automático: 1 alerta (+25 min), consultada y reconocida por HTTP | Para las tardías, solo el despliegue del programador. Para las **ausencias**: una fuente aprobada de evidencia de cobertura por ruta y día |
 | ALT-008 | Conectada a `timbradas_anio` y `progvehiculos`, de solo lectura. Apagada por defecto | En el recorrido automático, con tablas sintéticas: 1 alerta (−88 %) | Que Extreme confirme el significado y el período de `timbradas_anio` y el hallazgo §9.1; luego habilitar `ALT008_REFERENCIA=timbradas_anio` |
