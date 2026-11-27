@@ -1,12 +1,8 @@
 # Propuestas de esquema, fuentes y autorizaciones para las alertas: NO aplicadas
 
-Nada de esto se aplicó en ninguna base de trabajo. La revisión de Alembic del repositorio sigue en **0008**.
+La revisión 0010 se incluye en Alembic. Antes de desplegar una versión que la incluya, respalde la base de destino. Las pruebas de integración que cubren la ausencia de la tabla parten de 0008 y aplican el DDL de prueba en su transacción.
 
-La propuesta 0010 está en `propuestas/migraciones/`, **fuera** de `migrations/versions/`: `alembic upgrade head` no la aplica. Solo se aplicó dentro de bases de prueba aisladas:
-- en una transacción que se revierte;
-- en la instancia exclusiva del recorrido automático.
-
-**Numeración.** DECISIONES reserva la **0009** para la migración de sentido IDA/VUELTA (§14). Por eso la propuesta es la **0010**, con `down_revision = "0008"`. Si la 0009 se aprueba antes, hay que cambiar ese valor a `"0009"`.
+**Numeración.** DECISIONES reserva la **0009** para la migración de sentido IDA/VUELTA (§14). La revisión de completitud es la **0010**, con `down_revision = "0008"`. Si la 0009 se aprueba antes, hay que cambiar ese valor a `"0009"`.
 
 ## P1. Completitud por ruta y día: desbloquea ALT-005, ALT-007 y ALT-010
 
@@ -14,19 +10,19 @@ La propuesta 0010 está en `propuestas/migraciones/`, **fuera** de `migrations/v
 
 | Pieza | Dónde | Qué hace |
 | --- | --- | --- |
-| Tabla (propuesta) | `propuestas/migraciones/0010_completitud_ruta_dia.sql`, `.py` y su reversión | Crea `completitud_ruta_dia` (estado vigente con evidencia, regla y ejecución) y `completitud_ruta_dia_historial` (la versión anterior de cada cambio). Solo objetos nuevos en `ai_frecuencias` |
+| Tabla (0010) | `migrations/sql/0010_completitud_ruta_dia.sql`, su reversión y la revisión en `migrations/versions/` | Crea `completitud_ruta_dia` (estado vigente con evidencia, regla y ejecución) y `completitud_ruta_dia_historial` (la versión anterior de cada cambio). Solo objetos nuevos en `ai_frecuencias` |
 | Mecanismo que la llena | `app/calidad/completitud.py` (`calcular`, `registrar`) y `flujo.evaluar_completitud` | Corre en cada ciclo diario, antes de ALT-005, ALT-007 y ALT-010. Recalcula los últimos 35 días consolidados. Solo escribe lo que cambió y guarda antes la versión anterior en el historial |
-| Fuente de referencia | `fuentes_extreme.ProgramacionesPorDia` | Lee `progvehiculos` de Extreme con el usuario de solo lectura y da las programaciones por ruta y día |
+| Fuente de referencia | `fuentes_extreme.ProgramacionesPorDia` | Lee `progvehiculos` de Extreme con el usuario de solo lectura y devuelve el total y los identificadores de programación por ruta y día |
 
-**Criterio `completitud-v1`.** Un día queda `completo` si cumple estas cuatro condiciones:
+**Criterio `completitud-v2`.** Un día queda `completo` si cumple estas cuatro condiciones:
 1. está consolidado;
 2. la última ingesta terminó exitosa, completa y con consulta válida;
-3. las programaciones de Extreme para ese día son más de 0 y coinciden con los viajes copiados;
+3. la referencia devuelve al menos una programación con identificadores únicos y el conjunto de identificadores coincide con el de la copia local;
 4. la cobertura de conteos es mayor o igual al umbral de ALT-009 (0,90).
 
 Si se cumplen 1 a 3 pero no 4, o si la copia no coincide, queda `parcial`. En cualquier otro caso queda `desconocido`.
 
-Este criterio **no certifica** el universo de viajes de Extreme (DECISIONES §16.6).
+La igualdad se comprueba por `idprogramacion`. La evidencia guarda cuántos identificadores faltan y cuántos sobran. Dos días con el mismo total pueden contener programaciones diferentes. Una referencia sin identificadores válidos deja el estado `desconocido`. El resultado acredita concordancia con la fuente visible. La cobertura del universo esperado requiere confirmar el alcance de la referencia con Extreme (DECISIONES §16.6).
 
 **Sin la tabla.** El mecanismo calcula, no escribe y responde `tabla_pendiente_de_aprobacion`.
 

@@ -91,9 +91,10 @@ class ProgramacionesPorDia:
         return f"{_esquema()}.progvehiculos"
 
     def leer(self, desde, hasta) -> pd.DataFrame:
-        """idruta, fecha, programaciones con salida en [desde, hasta)."""
+        """Cantidad e identificadores de las programaciones por ruta y día en [desde, hasta)."""
         with _leer() as c:
             return pd.read_sql(text(f"""
-                SELECT idruta, fechasalida::date AS fecha, COUNT(*) AS programaciones
+                SELECT idruta, fechasalida::date AS fecha, COUNT(*) AS programaciones,
+                       array_agg(idprogramacion) AS ids_programaciones
                 FROM {self.origen} WHERE idruta = ANY(:r) AND fechasalida >= :d AND fechasalida < :h
                 GROUP BY 1, 2"""), c, params={"r": list(self.rutas), "d": desde, "h": hasta})

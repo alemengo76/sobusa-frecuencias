@@ -56,5 +56,6 @@ GRANT USAGE ON SCHEMA ai_frecuencias TO sobusa_lector;
 ALTER DEFAULT PRIVILEGES FOR ROLE sobusa_escritor IN SCHEMA ai_frecuencias GRANT SELECT ON TABLES TO sobusa_lector;
 SQL
 cd "$REPO"
-DATABASE_URL_WRITE="postgresql+psycopg://sobusa_escritor@/$BD?host=$SOCK&port=$PORT" "$VENV/bin/alembic" upgrade head
+# La suite cubre el estado anterior a 0010 y aplica su DDL dentro de cada prueba pertinente.
+DATABASE_URL_WRITE="postgresql+psycopg://sobusa_escritor@/$BD?host=$SOCK&port=$PORT" "$VENV/bin/alembic" upgrade 0008
 $P -d "$BD" -c "SELECT version_num FROM ai_frecuencias.alembic_version"

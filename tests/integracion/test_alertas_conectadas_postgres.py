@@ -641,8 +641,11 @@ class ProgramacionesSinteticas:
         self._e = esperadas
 
     def leer(self, desde, hasta):
-        return pd.DataFrame([{"idruta": r, "fecha": d, "programaciones": n} for (r, d), n in self._e.items()],
-                            columns=["idruta", "fecha", "programaciones"])
+        return pd.DataFrame(
+            [{"idruta": r, "fecha": d, "programaciones": len(ids), "ids_programaciones": ids}
+             for (r, d), ids in self._e.items()],
+            columns=["idruta", "fecha", "programaciones", "ids_programaciones"],
+        )
 
 
 def _aplicar_propuesta_0010(c):
@@ -673,10 +676,14 @@ def test_completitud_llena_la_tabla_con_evidencia_y_desbloquea_005_007(c, ids):
                       finalizado, cancelada, numeropasajeros, lote) VALUES (:v, :r, :s, :s, :s, 'S', 'N', 5, 'sint')"""),
               [{"v": base + k, "r": ruta, "s": dia + pd.Timedelta(minutes=15 * k)} for k in range(24, 36)])
     marca = datetime(2025, 11, 24, 11)
-    referencia = ProgramacionesSinteticas({(ruta, dia.date()): 12, (ruta, (dia - pd.Timedelta(days=1)).date()): 7})
+    ids_correctos = list(range(base + 24, base + 36))
+    referencia = ProgramacionesSinteticas({
+        (ruta, dia.date()): ids_correctos,
+        (ruta, (dia - pd.Timedelta(days=1)).date()): list(range(7)),
+    })
     eid = repo.crear_ejecucion(c, "alertas", {}, ids["tag"])
     r = flujo.evaluar_completitud(c, eid, marca, referencia, (ruta,))
-    assert r["estado"] == "evaluada" and r["escritas"] == 35 and r["regla"] == "completitud-v1", r
+    assert r["estado"] == "evaluada" and r["escritas"] == 35 and r["regla"] == "completitud-v2", r
     filas = {f.fecha: f for f in c.execute(text(
         "SELECT * FROM ai_frecuencias.completitud_ruta_dia WHERE idruta = :r"), {"r": ruta})}
     hoy = filas[dia.date()]
@@ -690,13 +697,18 @@ def test_completitud_llena_la_tabla_con_evidencia_y_desbloquea_005_007(c, ids):
     # repetir no reescribe; un cambio deja la versión anterior en el historial
     eid2 = repo.crear_ejecucion(c, "alertas", {}, ids["tag"])
     assert flujo.evaluar_completitud(c, eid2, marca, referencia, (ruta,))["escritas"] == 0
-    referencia._e[(ruta, dia.date())] = 13
+    referencia._e[(ruta, dia.date())] = [*ids_correctos[:-1], base + 100]
     eid3 = repo.crear_ejecucion(c, "alertas", {}, ids["tag"])
     assert flujo.evaluar_completitud(c, eid3, marca, referencia, (ruta,))["escritas"] == 1
+    (estado, evidencia) = c.execute(text(
+        "SELECT estado, evidencia FROM ai_frecuencias.completitud_ruta_dia WHERE idruta = :r AND fecha = :f"
+    ), {"r": ruta, "f": dia.date()}).one()
+    assert estado == "parcial" and evidencia["programaciones_referencia"] == evidencia["viajes_copiados"]
+    assert evidencia["ids_faltantes"] == evidencia["ids_sobrantes"] == 1
     (h,) = c.execute(text("SELECT estado, execution_id FROM ai_frecuencias.completitud_ruta_dia_historial "
                           "WHERE idruta = :r AND fecha = :f"), {"r": ruta, "f": dia.date()}).all()
     assert h.estado == "completo" and str(h.execution_id) == eid
-    referencia._e[(ruta, dia.date())] = 12
+    referencia._e[(ruta, dia.date())] = ids_correctos
     flujo.evaluar_completitud(c, repo.crear_ejecucion(c, "alertas", {}, ids["tag"]), marca, referencia, (ruta,))
     # recorrido: con la evidencia ESCRITA por el mecanismo, ALT-005/007 son evaluables y alertan
     _prediccion(c, ruta, [(dia + pd.Timedelta(hours=6), 80), (dia + pd.Timedelta(hours=6, minutes=30), 80),
@@ -716,6 +728,6 @@ def test_completitud_sin_tabla_calcula_pero_no_escribe(c, ids):
     _ingesta_ok(c, ids)
     eid = repo.crear_ejecucion(c, "alertas", {}, ids["tag"])
     r = flujo.evaluar_completitud(c, eid, datetime(2025, 11, 24, 11),
-                                  ProgramacionesSinteticas({(RUTA_M1, DIA.date()): 3}), (RUTA_M1,))
+                                  ProgramacionesSinteticas({(RUTA_M1, DIA.date()): [1, 2, 3]}), (RUTA_M1,))
     assert r["estado"] == "no_evaluable" and r["motivo"] == "tabla_pendiente_de_aprobacion"
     assert r["escritas"] == 0 and sum(r["calculadas"].values()) == 35
