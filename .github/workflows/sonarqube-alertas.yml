@@ -59,7 +59,7 @@ jobs:
           work = temp / "sonar-trabajo"
           evidence = temp / "sonar-evidencia"
 
-          def api(path, *, query=None, form=None, password=None):
+          def api(path, *, query=None, form=None, password=None, starting=False):
               url = f"{host}/{path}" + (f"?{urlencode(query)}" if query else "")
               headers = {}
               if password is not None:
@@ -71,22 +71,42 @@ jobs:
                       body = response.read()
                       return json.loads(body) if body else None
               except HTTPError as exc:
+                  if starting and exc.code in (502, 503, 504):
+                      raise
                   raise RuntimeError(f"SonarQube {path}: HTTP {exc.code}") from None
 
           def save(name, value):
               (evidence / name).write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
-          health = {}
-          for _ in range(90):
-              try:
-                  health = api("api/system/status")
-                  if health["status"] == "UP":
-                      break
-              except (URLError, TimeoutError):
-                  pass
-              time.sleep(3)
-          else:
-              raise SystemExit(f"SonarQube no alcanzó UP en el puerto 9100. Último estado: {health}")
+          def wait_for_server():
+              deadline = time.monotonic() + 300
+              last_status = "sin respuesta"
+              while time.monotonic() < deadline:
+                  try:
+                      health = api("api/system/status", starting=True)
+                      if health["status"] == "UP":
+                          return health
+                      last_status = health["status"]
+                  except (URLError, ConnectionError, TimeoutError) as exc:
+                      last_status = f"{type(exc).__name__}: {exc}"
+
+                  result = subprocess.run([
+                      "docker", "inspect", "--format", "{{json .State}}", "sobusa-sonarqube",
+                  ], check=True, capture_output=True, text=True)
+                  state = json.loads(result.stdout)
+                  if not state["Running"]:
+                      raise SystemExit(
+                          f"SonarQube se detuvo durante el arranque: {state['Status']}, "
+                          f"código {state['ExitCode']}, OOMKilled={state['OOMKilled']}. "
+                          f"Última comprobación: {last_status}"
+                      )
+                  time.sleep(3)
+              raise SystemExit(
+                  f"SonarQube no alcanzó UP en el puerto 9100 en 300 s. "
+                  f"Última comprobación: {last_status}"
+              )
+
+          health = wait_for_server()
           save("servidor.json", health)
 
           # El usuario inicial viene con la imagen. Su contraseña se rota antes de crear el proyecto.
@@ -183,7 +203,9 @@ jobs:
         if: always()
         run: |
           if docker inspect sobusa-sonarqube >/dev/null 2>&1; then
-            docker logs sobusa-sonarqube > "$RUNNER_TEMP/sonar-evidencia/servidor.log" 2>&1 || true
+            docker inspect --format '{{json .State}}' sobusa-sonarqube \
+              | tee "$RUNNER_TEMP/sonar-evidencia/estado-contenedor.json"
+            docker logs --timestamps sobusa-sonarqube > "$RUNNER_TEMP/sonar-evidencia/servidor.log" 2>&1 || true
             docker rm -fv sobusa-sonarqube
           fi
 
