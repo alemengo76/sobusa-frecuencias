@@ -1,0 +1,1 @@
+alert_id,codigo,severidad,estado,idruta,franja_inicio,horizonte_min,valor_observado,valor_esperado,umbral,puntuacion_anomalia,explicacion,recomendacion
