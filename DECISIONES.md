@@ -375,7 +375,7 @@ Una vez aprobada la equivalencia, la implementación deberá alinear el catálog
 
 Esta decisión no certifica que se haya recibido el universo completo de programaciones esperado. La detección de retrasos acredita el cumplimiento o incumplimiento de ciclos de actualización definidos, no la completitud absoluta de la fuente.
 
-Tampoco autoriza cambios inmediatos en la base de datos, migraciones, `app/servicios.py` ni en el flujo de ingesta.
+El 26 de noviembre de 2026, Alejandra aprobó el ajuste de incompletitud de ALT-009 en `app/servicios.py` y la incorporación de `app/ciclo_alertas.py` para el ciclo automático de alertas. El programador, los horarios, la migración `0010`, las notificaciones y la autorización de reintentos siguen pendientes de activación o aprobación operativa, según corresponda.
 
 ### 7. Criterios para considerar ALT-009 implementada
 
