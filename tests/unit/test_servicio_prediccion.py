@@ -212,6 +212,7 @@ def test_alertas_de_frecuencia_solo_60_min_con_umbral_de_la_base(entorno):
          patch.object(servicios.repo, "demanda_franja", _demanda_franja(entorno["franjas"])), \
          patch.object(servicios.repo, "claves_alertas_abiertas", return_value=set()), \
          patch.object(servicios.repo, "insertar_alertas") as insertar, \
+         patch.object(servicios.lectura_real, "marca_agua", return_value=None), \
          patch.object(servicios, "notificar"):
         servicios.evaluar_alertas(MagicMock(), "e", pred, rec)
     alertas = insertar.call_args.args[2]

@@ -290,3 +290,104 @@ cubría `/recommendations/calculate`.
 - **Pruebas unitarias y API:** 202 pruebas unitarias/API aprobadas, 0 fallidas y 0 omitidas, ejecutadas el 14 de noviembre de 2026 en el entorno del proyecto. Se generaron 1.238 advertencias, principalmente de compatibilidad con Pandas 4. Permanecen advertencias de compatibilidad futura de Pandas y Starlette.
 - **Pruebas de integración PostgreSQL:** 39 aprobadas en base desechable. E7 verificó 260 recomendaciones nuevas, ninguna sin `prediction_id` y ninguna con enlaces inconsistentes. E8 verificó que el downgrade se rechaza cuando la clave antigua produciría colisiones, conservando la base en `0008`.
 - **Precaución para pruebas de integración:** test_reproduce_a1 requiere una base de datos desechable recién restaurada. No debe repetirse sobre la misma base sin restaurarla previamente, porque los datos residuales pueden alterar el resultado.
+
+## 16. Alcance funcional de ALT-009: datos incompletos y retrasos de ingesta
+
+**Estado: decisión aprobada por el equipo el 22 de noviembre de 2026.**
+
+### Decisión
+
+ALT-009 cubrirá dos condiciones de incumplimiento relacionadas, pero diferentes:
+
+1. **Incompletitud de los datos:** existen viajes elegibles observados cuya información obligatoria de pasajeros no tiene un conteo utilizable.
+2. **Retraso de ingesta:** la información correspondiente a un ciclo de actualización esperado no se recibe correctamente dentro del plazo establecido.
+
+Las dos condiciones forman parte de ALT-009 porque la especificación técnica v1.5, §5.2, agrupa la falta de información obligatoria y su retraso bajo la misma alerta.
+
+No se eliminará la lógica existente de detección de conteos incompletos para implementar la detección de retrasos. Ambas condiciones deberán coexistir y conservar su significado propio.
+
+### 1. Condición de incompletitud
+
+Se conserva la lógica existente de cobertura de conteos de pasajeros sobre los viajes elegibles observados.
+
+La cobertura se calcula como:
+
+`1 - (viajes elegibles sin conteo usable / viajes elegibles observados)`
+
+Se considera que un conteo no es utilizable cuando es nulo o negativo, de acuerdo con las reglas de calidad vigentes.
+
+Esta condición permite detectar problemas en los datos de viajes que ya fueron recibidos. No demuestra que se haya recibido el universo completo de información esperado.
+
+Por tanto, la cobertura de los viajes observados no se utilizará como evidencia de que la fuente entregó todos los registros que debía entregar.
+
+### 2. Condición de retraso de ingesta
+
+Se incorporará una detección independiente de retrasos en la actualización de datos.
+
+El ciclo esperado es diario y se evalúa por fuente y alcance. Se genera un incumplimiento de retraso tras dos ciclos diarios consecutivos vencidos sin una ingesta completa y exitosa dentro del plazo de cada ciclo.
+
+Un ciclo se considerará satisfecho únicamente cuando exista evidencia de una ingesta completa y exitosa para el alcance evaluado.
+
+Se distinguirán, como mínimo, los siguientes resultados:
+
+- Ingesta exitosa y completa.
+- Ingesta fallida.
+- Ingesta parcial.
+- Ingesta no iniciada.
+- Ingesta exitosa sin novedades, siempre que exista evidencia de consulta válida del alcance.
+
+Las ingestas parciales o fallidas dejan el ciclo sin satisfacer. La ausencia de datos nuevos es inconcluyente por sí sola. Para contar una ingesta sin novedades como exitosa se requiere evidencia de una consulta válida que cubra el alcance del ciclo.
+
+La hora de vencimiento será configurable y queda pendiente de validación con Extreme o con el responsable operativo. La apertura y la tolerancia también quedan pendientes de validación operativa.
+
+### 3. Separación de condiciones y reconciliación
+
+Aunque ambas condiciones pertenezcan a ALT-009, deberán identificarse internamente de forma diferenciada.
+
+La detección, persistencia, consulta y recuperación de una condición no deberá cerrar, descartar ni ocultar automáticamente la otra.
+
+La deduplicación y la identidad de las situaciones deberán permitir que ambas condiciones coexistan cuando corresponda.
+
+Cualquier cambio en el alcance o comportamiento de ALT-009 deberá acompañarse de una estrategia de reconciliación de las alertas abiertas, de acuerdo con la regla establecida en la sección 14 de este documento.
+
+### 4. Persistencia y trazabilidad
+
+La condición de incompletitud deberá conservar la evidencia de los viajes observados y sus conteos no utilizables, conforme al mecanismo de calidad existente.
+
+La condición de retraso deberá contar con trazabilidad de los ciclos esperados y de los intentos de ingesta asociados. Como mínimo, deberá poder determinarse:
+
+- Fuente y alcance evaluados.
+- Identificador del ciclo y sus instantes de apertura y vencimiento.
+- Política de calendario aplicada.
+- Intentos de ingesta y sus resultados.
+- Evidencia de finalización completa o parcial.
+- Momento de recuperación, si ocurre después del vencimiento.
+
+Una ingesta completa y exitosa posterior para la misma fuente y alcance recupera la alerta de retraso. Se registra el momento de recuperación y se conserva el incumplimiento histórico con el resultado de cada ciclo según su plazo original.
+
+### 5. Severidad
+
+La severidad funcional de ALT-009 es **Crítica**, según la especificación técnica v1.5. La equivalencia técnica propuesta para la persistencia es `alta`, el valor que admite el esquema actual. Su uso queda pendiente de aprobación del equipo.
+
+Una vez aprobada la equivalencia, la implementación deberá alinear el catálogo, la persistencia y las validaciones, y verificar con pruebas la clasificación funcional y el valor persistido.
+
+### 6. Alcance y límites
+
+Esta decisión no certifica que se haya recibido el universo completo de programaciones esperado. La detección de retrasos acredita el cumplimiento o incumplimiento de ciclos de actualización definidos, no la completitud absoluta de la fuente.
+
+Tampoco autoriza cambios inmediatos en la base de datos, migraciones, `app/servicios.py` ni en el flujo de ingesta.
+
+### 7. Criterios para considerar ALT-009 implementada
+
+La implementación deberá demostrar, mediante pruebas, al menos:
+
+- Detección de conteos incompletos sin confundirla con retrasos de ingesta.
+- Detección de dos ciclos consecutivos vencidos.
+- Diferenciación entre ingesta fallida, parcial, no iniciada y exitosa sin novedades.
+- Ausencia de alertas falsas cuando no hay viajes nuevos, pero sí una consulta válida.
+- Coexistencia de las dos condiciones sin cierres cruzados.
+- Deduplicación de episodios y persistencia de su historial.
+- Recuperación tardía sin borrar el incumplimiento anterior.
+- Comportamiento correcto ante ejecuciones concurrentes del proceso de ingesta y del verificador.
+
+La implementación solo podrá considerarse terminada cuando se verifique el flujo completo de detección, persistencia, consulta, deduplicación y recuperación.

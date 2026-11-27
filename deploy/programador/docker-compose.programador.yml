@@ -1,0 +1,32 @@
+# Servicio del programador del ciclo diario. NO se activa solo: hay que pedirlo explícitamente con el
+# perfil "programador" y este archivo, después de completar programador.env (ver README.md):
+#
+#   docker compose -f docker-compose.yml -f deploy/programador/docker-compose.programador.yml \
+#       --profile programador up -d programador
+#
+# Usa la misma imagen que `app` y las mismas credenciales (.env). No aplica migraciones: el comando es el
+# programador, no el arranque de la API.
+services:
+  programador:
+    profiles: ["programador"]
+    platform: linux/amd64
+    build:
+      context: .
+      args:
+        PIP_MODO: ${PIP_MODO:-internet}
+      additional_contexts:
+        wheelhouse: ${WHEELHOUSE_DIR:-./docker/wheelhouse-vacio}
+    env_file:
+      - .env
+      - deploy/programador/programador.env
+    environment:
+      DATABASE_URL_WRITE: ${DATABASE_URL_WRITE_DOCKER}
+      MODELOS_DIR: /app/modelos
+      TZ: America/Bogota
+    volumes:
+      - ./modelos:/app/modelos:ro
+    command: ["python", "-m", "app.programador"]
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy

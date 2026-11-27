@@ -235,6 +235,65 @@ def insertar_alertas(c, eid: str, alertas: list[dict], versiones: dict) -> int:
     return len(alertas)
 
 
+def insertar_alerta(c, eid: str, a: dict, umbral_version: int | None) -> int | None:
+    """Inserta UNA alerta con su historial «creada». Devuelve su alert_id, o None si ya había una
+    abierta o en gestión con la misma clave. (insertar_alertas conserva su contrato: cuenta candidatas.)"""
+    fila = {k: a.get(k) for k in ("codigo", "severidad", "idruta", "franja_inicio", "horizonte_min",
+                                  "valor_observado", "valor_esperado", "umbral",
+                                  "puntuacion_anomalia", "explicacion", "recomendacion", "clave_dedup")}
+    fila.update(execution_id=eid, umbral_version=umbral_version)
+    aid = c.execute(text("""
+        INSERT INTO alert (execution_id, codigo, severidad, idruta, franja_inicio, horizonte_min,
+            valor_observado, valor_esperado, umbral, umbral_version, puntuacion_anomalia,
+            explicacion, recomendacion, clave_dedup)
+        VALUES (:execution_id, :codigo, :severidad, :idruta, :franja_inicio, :horizonte_min,
+            :valor_observado, :valor_esperado, :umbral, :umbral_version, :puntuacion_anomalia,
+            :explicacion, :recomendacion, :clave_dedup)
+        ON CONFLICT (clave_dedup) WHERE estado IN ('abierta', 'reconocida', 'asignada') DO NOTHING
+        RETURNING alert_id"""), fila).scalar()
+    if aid:
+        c.execute(text("""INSERT INTO alert_history (alert_id, accion, estado_nuevo, usuario)
+                          VALUES (:a, 'creada', 'abierta', 'sistema')"""), {"a": aid})
+    return aid
+
+
+def alertas_con_prefijo(c, codigo: str, prefijo: str) -> list[dict]:
+    """Alertas de `codigo` cuya clave empieza por `prefijo`, en cualquier estado."""
+    return [dict(f) for f in c.execute(text("""
+        SELECT alert_id, estado, idruta, franja_inicio, clave_dedup, valor_observado
+        FROM alert WHERE codigo = :codigo AND starts_with(clave_dedup, :p) ORDER BY alert_id"""),
+        {"codigo": codigo, "p": prefijo}).mappings()]
+
+
+def notas_de_alertas(c, alert_ids, marca: str) -> dict[int, list[str]]:
+    """Comentarios del sistema que empiezan por `marca`, por alerta."""
+    ids = [int(x) for x in alert_ids]
+    if not ids:
+        return {}
+    out: dict[int, list[str]] = {i: [] for i in ids}
+    for aid, comentario in c.execute(text("""
+            SELECT alert_id, comentario FROM alert_history
+            WHERE alert_id = ANY(:ids) AND accion = 'comentario' AND usuario = 'sistema'
+              AND starts_with(comentario, :m) ORDER BY id"""), {"ids": ids, "m": marca}):
+        out[aid].append(comentario)
+    return out
+
+
+def anotar_alerta(c, alert_id: int, comentario: str) -> None:
+    """Deja constancia en el historial SIN cambiar el estado de la alerta."""
+    c.execute(text("""INSERT INTO alert_history (alert_id, accion, comentario, usuario)
+                      VALUES (:a, 'comentario', :c, 'sistema')"""), {"a": int(alert_id), "c": comentario})
+
+
+def ingestas_registradas(c, fuente: str, desde: datetime) -> list[dict]:
+    """Intentos de ingesta de `fuente` iniciados desde `desde` (execution_log, tipo 'ingesta')."""
+    return [dict(f) for f in c.execute(text("""
+        SELECT execution_id::text AS execution_id, estado, parametros, resumen, iniciada_en, finalizada_en
+        FROM execution_log
+        WHERE tipo = 'ingesta' AND parametros->>'fuente' = :f AND iniciada_en >= :d
+        ORDER BY iniciada_en, execution_id"""), {"f": fuente, "d": desde}).mappings()]
+
+
 # ------------------------------------------------------------------ gestión de alertas
 
 def obtener_alerta(c, alert_id: int, bloquear=False) -> dict | None:
