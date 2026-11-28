@@ -1,14 +1,19 @@
 """API de consulta de alertas para Render."""
+import csv
+import hmac
+import io
 import logging
+import re
 import os
 from datetime import datetime
 from typing import Literal
 
 import psycopg
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 from psycopg.rows import dict_row
 
-app = FastAPI(title="SOBUSA · Consulta de alertas", docs_url=None, redoc_url=None)
+app = FastAPI(title="SOBUSA · Consulta de alertas", docs_url=None, redoc_url=None, openapi_url=None)
 log = logging.getLogger(__name__)
 DATABASE = "sobusa_alertas_render"
 READER = "sobusa_alertas_lector"
@@ -16,6 +21,36 @@ COLUMNS = (
     "alert_id, codigo, severidad, estado, idruta, franja_inicio, horizonte_min, "
     "valor_observado, valor_esperado, umbral, puntuacion_anomalia, explicacion, recomendacion"
 )
+
+
+EXPORT_LIMIT = 8 * 1024 * 1024
+TOKEN_FORMAT = re.compile(r"[A-Za-z0-9_-]{43,128}")
+
+
+@app.middleware("http")
+async def authorize(request: Request, call_next):
+    """Health checks are public; every other route is server-to-server only."""
+    if request.url.path != "/healthz":
+        token = os.environ.get("SOBUSA_API_TOKEN", "")
+        if not TOKEN_FORMAT.fullmatch(token):
+            return JSONResponse({"detail": "Acceso de consulta sin configurar"}, 503,
+                                headers={"Cache-Control": "no-store"})
+        authorization = request.headers.getlist("authorization")
+        supplied = authorization[0].removeprefix("Bearer ") if len(authorization) == 1 else ""
+        if (len(authorization) != 1 or not authorization[0].startswith("Bearer ")
+                or not TOKEN_FORMAT.fullmatch(supplied) or not hmac.compare_digest(supplied, token)):
+            return JSONResponse({"detail": "Acceso no autorizado"}, 401,
+                                headers={"WWW-Authenticate": "Bearer", "Cache-Control": "no-store"})
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+def csv_cell(value):
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
 
 
 def connect():
@@ -92,3 +127,37 @@ def alerts(
         raise HTTPException(503, "Base de consulta no disponible") from None
     return {"datos": records, "paginacion": {"pagina": pagina, "tamano": tamano,
                                             "total": total, "paginas": (total + tamano - 1) // tamano}}
+
+@app.get("/api/v1/alerts/export")
+def export_alerts():
+    """CSV de la proyección autorizada, sin filtros ni paginación."""
+    fields = COLUMNS.split(", ")
+    buffer = io.StringIO(newline="")
+    writer = csv.writer(buffer)
+    writer.writerow(fields)
+    output = bytearray.fromhex("efbbbf")
+
+    def flush():
+        output.extend(buffer.getvalue().encode("utf-8"))
+        if len(output) > EXPORT_LIMIT:
+            raise HTTPException(413, "El CSV completo excede el límite de descarga")
+        buffer.seek(0)
+        buffer.truncate()
+
+    try:
+        with connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                verify_reader(cur)
+            with conn.cursor(name="sobusa_csv") as cur:
+                cur.execute(f"SELECT {COLUMNS} FROM public.alertas_publicas ORDER BY alert_id DESC")
+                for row in cur:
+                    writer.writerow([csv_cell(row[field]) for field in fields])
+                    if buffer.tell() >= 8192:
+                        flush()
+                flush()
+    except (psycopg.Error, RuntimeError) as exc:
+        log.warning("Exportación no disponible (%s)", type(exc).__name__)
+        raise HTTPException(503, "Base de consulta no disponible") from None
+    return Response(bytes(output), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": 'attachment; filename="sobusa_alertas_autorizadas.csv"'})

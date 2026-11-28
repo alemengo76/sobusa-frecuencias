@@ -167,7 +167,7 @@ def solicitar(metodo: str, ruta: str, *, params=None, json=None, timeout: float 
     funcion = {"GET": requests.get, "POST": requests.post, "PATCH": requests.patch}[metodo]
     url = f"{url_api()}/{ruta.lstrip('/')}"
     argumentos = {"timeout": timeout}
-    if metodo in ("POST", "PATCH"):
+    if credencial or metodo in ("POST", "PATCH"):
         argumentos.update(opciones_bearer(credencial))
     if params is not None:
         argumentos["params"] = _limpiar(params)
@@ -197,7 +197,7 @@ def solicitar(metodo: str, ruta: str, *, params=None, json=None, timeout: float 
                        no_confirmada=modifica) from e
 
     codigo = r.status_code
-    if credencial and metodo != "GET" and 300 <= codigo < 400:
+    if credencial and 300 <= codigo < 400:
         raise ErrorApi("http", "La API devolvió una redirección. No se volvió a enviar la credencial.",
                        codigo_http=codigo, no_confirmada=modifica)
     if codigo >= 400:
@@ -224,22 +224,22 @@ def solicitar(metodo: str, ruta: str, *, params=None, json=None, timeout: float 
                        codigo_http=codigo, no_confirmada=modifica) from e
 
 
-def obtener(ruta: str, params=None, *, timeout: float = TIEMPO_CONSULTA) -> dict:
+def obtener(ruta: str, params=None, *, timeout: float = TIEMPO_CONSULTA, credencial: str = "") -> dict:
     """GET que exige un objeto JSON."""
-    cuerpo = solicitar("GET", ruta, params=params, timeout=timeout)
+    cuerpo = solicitar("GET", ruta, params=params, timeout=timeout, credencial=credencial)
     if not isinstance(cuerpo, Mapping):
         raise ErrorApi("estructura", "La respuesta de la API no tiene el formato esperado "
                        "(no es un objeto JSON).")
     return dict(cuerpo)
 
 
-def obtener_pagina(ruta: str, params=None, *, timeout: float = TIEMPO_CONSULTA) -> Pagina:
+def obtener_pagina(ruta: str, params=None, *, timeout: float = TIEMPO_CONSULTA, credencial: str = "") -> Pagina:
     """GET paginado. Comprueba ``datos`` y ``paginacion``; nunca convierte un error en página vacía."""
     params = dict(params or {})
     tamano = params.get("tamano", 50)
     if isinstance(tamano, bool) or not isinstance(tamano, int) or not 1 <= tamano <= TAMANO_PAGINA_MAX:
         raise ValueError(f"'tamano' debe ser un entero entre 1 y {TAMANO_PAGINA_MAX}")
-    cuerpo = obtener(ruta, params, timeout=timeout)
+    cuerpo = obtener(ruta, params, timeout=timeout, credencial=credencial)
     datos, pag = cuerpo.get("datos"), cuerpo.get("paginacion")
     if not isinstance(datos, list) or not isinstance(pag, Mapping):
         raise ErrorApi("estructura", "La respuesta de la API no tiene 'datos' y 'paginacion'.")
@@ -406,3 +406,20 @@ def ids_de_detalle(detalle: Mapping) -> dict:
         salida["recomendaciones_de"] = eid
         salida["prediccion_origen"] = _texto(parametros.get("execution_id_prediccion"))
     return salida
+
+
+def exportar_csv(credencial: str) -> bytes:
+    """Descarga por el servidor, sin pasar la llave al navegador."""
+    try:
+        with requests.get(f"{url_api()}/alerts/export", **opciones_bearer(credencial),
+                          timeout=20, stream=True) as response:
+            if response.status_code != 200 or not response.headers.get("Content-Type", "").startswith("text/csv"):
+                raise ErrorApi("http", "No se pudo obtener el CSV completo.", codigo_http=response.status_code)
+            output = bytearray()
+            for chunk in response.iter_content(65536):
+                output.extend(chunk)
+                if len(output) > 8 * 1024 * 1024:
+                    raise ErrorApi("estructura", "El CSV excede el límite de descarga.")
+            return bytes(output)
+    except requests.RequestException:
+        raise ErrorApi("comunicacion", "No fue posible descargar el CSV.") from None

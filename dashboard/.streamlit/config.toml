@@ -1,0 +1,8 @@
+[secrets]
+files = [".streamlit/secrets.toml", "/etc/secrets/secrets.toml"]
+
+[global]
+minCachedMessageSize = 1073741824
+
+[server]
+enableStaticServing = false

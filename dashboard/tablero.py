@@ -1,4 +1,8 @@
 """Bandeja de consulta derivada de la sección Alertas del tablero local."""
+import base64
+import os
+import re
+from time import time as now
 from datetime import datetime, time, timedelta, timezone
 from urllib.parse import urlsplit
 
@@ -10,6 +14,33 @@ import estilo as es
 
 st.set_page_config(page_title="SOBUSA · Alertas", layout="wide")
 st.title("Bandeja de alertas de SOBUSA")
+allowed = {item.strip().casefold() for item in os.environ.get("SOBUSA_ALLOWED_EMAILS", "").split(",")
+           if item.strip()}
+credential = os.environ.get("SOBUSA_API_TOKEN", "")
+if (not allowed or any("@" not in item or "*" in item for item in allowed)
+        or not re.fullmatch(r"[A-Za-z0-9_-]{43,128}", credential)):
+    st.error("El acceso a la bandeja aún no está configurado.")
+    st.stop()
+
+if not st.user.is_logged_in:
+    if st.button("Iniciar sesión con Google"):
+        st.login()
+    st.stop()
+
+email = st.user.get("email", "")
+expires = st.user.get("exp")
+if (not isinstance(email, str) or email.casefold() not in allowed
+        or st.user.get("email_verified") is not True
+        or not isinstance(expires, (int, float)) or not expires > now()):
+    st.error("Este correo no está autorizado o la sesión expiró.")
+    if st.button("Cerrar sesión"):
+        st.logout()
+    st.stop()
+
+if st.sidebar.button("Cerrar sesión"):
+    st.logout()
+    st.stop()
+
 url = cl.url_api()
 parsed = urlsplit(url)
 if parsed.path != "/api/v1" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or (
@@ -48,7 +79,7 @@ filters = {
 }
 page = st.number_input("Página", min_value=1, value=1, step=1, key=f"pagina:{filters}")
 try:
-    alerts = cl.obtener_pagina("alerts", {**filters, "pagina": int(page), "tamano": 50})
+    alerts = cl.obtener_pagina("alerts", {**filters, "pagina": int(page), "tamano": 50}, credencial=credential)
 except cl.ErrorApi as exc:
     st.error(exc.texto())
     st.stop()
@@ -68,3 +99,13 @@ if alerts.datos:
 else:
     st.info("No hay alertas en esta página para los filtros seleccionados.")
 st.caption(f"{len(alerts.datos)} filas en esta página. Página {alerts.pagina} de {alerts.paginas}.")
+
+if st.button("Preparar CSV de alertas autorizadas"):
+    try:
+        content = base64.b64encode(cl.exportar_csv(credential)).decode("ascii")
+    except cl.ErrorApi as exc:
+        st.error(exc.texto())
+    else:
+        # El CSV viaja en esta sesión y no se registra en el servidor de archivos de Streamlit.
+        st.iframe(f'<a href="data:text/csv;base64,{content}" download="sobusa_alertas_autorizadas.csv">'
+                  'Descargar CSV</a>', height=42, alt="Descarga de alertas")
